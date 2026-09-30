@@ -9,28 +9,26 @@ from typing import Any
 from uuid import uuid4
 
 import requests
-from requests import Response, Session
 
 BASE_URL = 'https://api.frankfurter.dev/v2'
 USER_AGENT = 'currency-data-pipeline/0.1'
+
 TIMEZONE = timezone(timedelta(hours=-3), name='UTC-03:00')
+
 LOGGER = logging.getLogger(__name__)
 
-JsonObject = dict[str, Any]
-DateLike = str | Date
-
-ROOT_DIR = Path(__file__).resolve().parents[2]
+ROOT_DIR = Path(__file__).resolve().parents[1]
 RAW_DIR = ROOT_DIR / 'data' / 'raw'
 
 
-class FrankfurterError(RuntimeError):
+class FrankfurterAPIError(RuntimeError):
     """
-    Represent an error raised while communicating with the remote API.
+    Represent an error raised while communicating with the Frankfurter API.
     """
 
 
 @dataclass(slots=True)
-class FrankfurterClient:
+class FrankfurterAPIClient:
     """
     Provide access to the rates and currencies endpoints of Frankfurter API v2.
 
@@ -41,19 +39,19 @@ class FrankfurterClient:
     """
     base_url: str = BASE_URL
     timeout: float = 30.0
-    session: Session = field(default_factory=Session, repr=False)
+    session: requests.Session = field(default_factory=requests.Session, repr=False)
 
     def get_rates(
         self,
         base: str = 'EUR',
         quotes: str | Iterable[str] | None = None,
-        date: DateLike | None = None,
-        start_date: DateLike | None = None,
-        end_date: DateLike | None = None,
+        date: str | Date | None = None,
+        start_date: str | Date | None = None,
+        end_date: str | Date | None = None,
         providers: str | Iterable[str] | None = None,
         group: str | None = None,
         expand_providers: bool = False
-    ) -> list[JsonObject]:
+    ) -> list[dict[str, Any]]:
         """
         Fetch current or historical rates as one record per currency pair.
 
@@ -62,9 +60,9 @@ class FrankfurterClient:
             quotes (str | Iterable[str] | None): Quote currency codes to include.
                 A comma-separated string and an iterable of strings are both accepted.
                 When omitted, the API returns every available quote currency.
-            date (str | datetime.date | None): Exact rate date in YYYY-MM-DD format.
-            start_date (str | datetime.date | None): First date of a historical range.
-            end_date (str | datetime.date | None): Last date of a historical range.
+            date (str | Date | None): Exact rate date in YYYY-MM-DD format.
+            start_date (str | Date | None): First date of a historical range.
+            end_date (str | Date | None): Last date of a historical range.
             providers (str | Iterable[str] | None): Provider keys used to filter rates.
             group (str | None): Optional range grouping, either ``week`` or ``month``.
             expand_providers (bool): Whether each rate should include provider details.
@@ -92,12 +90,12 @@ class FrankfurterClient:
             isinstance(record, dict) for record in payload
         ):
             LOGGER.error('Rates endpoint returned an unexpected payload')
-            raise FrankfurterError('Frankfurter returned an unexpected rates payload')
+            raise FrankfurterAPIError('Frankfurter returned an unexpected rates payload')
 
         required_fields = {'date', 'base', 'quote', 'rate'}
         if any(not required_fields.issubset(record) for record in payload):
             LOGGER.error('Rates endpoint returned an incomplete record')
-            raise FrankfurterError('Frankfurter returned an incomplete rate record')
+            raise FrankfurterAPIError('Frankfurter returned an incomplete rate record')
 
         return payload
 
@@ -105,7 +103,7 @@ class FrankfurterClient:
         self,
         include_legacy: bool = False,
         providers: str | Iterable[str] | None = None
-    ) -> list[JsonObject]:
+    ) -> list[dict[str, Any]]:
         """
         Fetch the currency catalogue and its publication coverage metadata.
 
@@ -121,7 +119,7 @@ class FrankfurterClient:
 
         Raises:
             ValueError: If a provider value is empty.
-            FrankfurterError: If the API request or response is invalid.
+            FrankfurterAPIError: If the currencies payload has an invalid structure.
         """
         params: dict[str, str] = {}
         if include_legacy:
@@ -136,14 +134,14 @@ class FrankfurterClient:
             isinstance(record, dict) for record in payload
         ):
             LOGGER.error('Currencies endpoint returned an unexpected payload')
-            raise FrankfurterError(
+            raise FrankfurterAPIError(
                 'Frankfurter returned an unexpected currencies payload'
             )
 
         required_fields = {'iso_code', 'name'}
         if any(not required_fields.issubset(record) for record in payload):
             LOGGER.error('Currencies endpoint returned an incomplete record')
-            raise FrankfurterError('Frankfurter returned an incomplete currency record')
+            raise FrankfurterAPIError('Frankfurter returned an incomplete currency record')
 
         return payload
 
@@ -159,7 +157,7 @@ class FrankfurterClient:
             Any: JSON response decoded into Python objects.
 
         Raises:
-            FrankfurterError: If the connection, HTTP response, or JSON body is invalid.
+            FrankfurterAPIError: If the connection, HTTP response, or JSON body is invalid.
         """
         url = f'{self.base_url.rstrip('/')}/{path.lstrip('/')}'
         LOGGER.info('Sending GET request: url=%s params=%s', url, params)
@@ -188,12 +186,12 @@ class FrankfurterClient:
                 status_code,
                 message
             )
-            raise FrankfurterError(
+            raise FrankfurterAPIError(
                 f'Frankfurter request failed with HTTP {status_code}: {message}'
             )
         except requests.RequestException as error:
             LOGGER.error('GET request failed: url=%s error=%s', url, error)
-            raise FrankfurterError(f'Could not connect to Frankfurter: {error}')
+            raise FrankfurterAPIError(f'Could not connect to Frankfurter: {error}')
 
         try:
             payload = response.json()
@@ -203,7 +201,7 @@ class FrankfurterClient:
                 url,
                 response.status_code
             )
-            raise FrankfurterError('Frankfurter returned invalid JSON')
+            raise FrankfurterAPIError('Frankfurter returned invalid JSON')
 
         record_count = len(payload) if isinstance(payload, (dict, list)) else None
         LOGGER.info(
@@ -218,23 +216,23 @@ class FrankfurterClient:
 def extract_rates(
     base: str = 'EUR',
     quotes: str | Iterable[str] | None = None,
-    date: DateLike | None = None,
-    start_date: DateLike | None = None,
-    end_date: DateLike | None = None,
+    date: str | Date | None = None,
+    start_date: str | Date | None = None,
+    end_date: str | Date | None = None,
     providers: str | Iterable[str] | None = None,
     group: str | None = None,
     expand_providers: bool = False,
     timeout: float = 30.0
-) -> list[JsonObject]:
+) -> list[dict[str, Any]]:
     """
-    Extract the Frankfurter rates.
+    Extract the Frankfurter API rates.
 
     Args:
         base (str): Base currency code used to calculate the rates.
         quotes (str | Iterable[str] | None): Quote currency codes to include.
-        date (str | datetime.date | None): Exact rate date in YYYY-MM-DD format.
-        start_date (str | datetime.date | None): First date of a historical range.
-        end_date (str | datetime.date | None): Last date of a historical range.
+        date (str | Date | None): Exact rate date in YYYY-MM-DD format.
+        start_date (str | Date | None): First date of a historical range.
+        end_date (str | Date | None): Last date of a historical range.
         providers (str | Iterable[str] | None): Provider keys used to filter rates.
         group (str | None): Optional range grouping, either ``week`` or ``month``.
         expand_providers (bool): Whether each rate should include provider details.
@@ -243,7 +241,7 @@ def extract_rates(
     Returns:
         list[dict[str, Any]]: Current or historical exchange-rate records.
     """
-    client = FrankfurterClient(timeout=timeout)
+    client = FrankfurterAPIClient(timeout=timeout)
     return client.get_rates(
         base=base,
         quotes=quotes,
@@ -260,9 +258,9 @@ def extract_currencies(
     include_legacy: bool = False,
     providers: str | Iterable[str] | None = None,
     timeout: float = 30.0
-) -> list[JsonObject]:
+) -> list[dict[str, Any]]:
     """
-    Extract the Frankfurter currency catalogue.
+    Extract the Frankfurter API currency catalogue.
 
     Args:
         include_legacy (bool): Whether historical currencies should be included.
@@ -273,7 +271,7 @@ def extract_currencies(
     Returns:
         list[dict[str, Any]]: Currency records and their publication metadata.
     """
-    client = FrankfurterClient(timeout=timeout)
+    client = FrankfurterAPIClient(timeout=timeout)
     return client.get_currencies(
         include_legacy=include_legacy,
         providers=providers
@@ -286,15 +284,11 @@ def persist_json(data: Any, destination: str | Path) -> str:
 
     Args:
         data (Any): JSON-serializable data returned by an extraction function.
-        destination (str | pathlib.Path): Local path where the JSON file should
+        destination (str | Path): Local path where the JSON file should
             be persisted, including its file name.
 
     Returns:
         str: Absolute path of the persisted JSON file.
-
-    Raises:
-        TypeError: If data contains a value that cannot be serialized as JSON.
-        OSError: If the destination directory or file cannot be written.
     """
     destination_path = Path(destination).resolve()
     destination_path.parent.mkdir(parents=True, exist_ok=True)
@@ -329,7 +323,7 @@ def run_extract(
 
     Args:
         batch_id (str | None): Batch identifier formatted as YYYYMMDDHHMMSS.
-            The current America/Sao_Paulo timestamp is used when omitted.
+            The current UTC-03:00 timestamp is used when omitted.
         base (str): Base currency code used to calculate the rates.
         quotes (str | Iterable[str] | None): Quote currency codes to include.
             When omitted, every available quote currency is extracted.
@@ -406,9 +400,9 @@ def run_extract(
 def _build_rate_params(
     base: str,
     quotes: str | Iterable[str] | None,
-    date: DateLike | None,
-    start_date: DateLike | None,
-    end_date: DateLike | None,
+    date: str | Date | None,
+    start_date: str | Date | None,
+    end_date: str | Date | None,
     providers: str | Iterable[str] | None,
     group: str | None,
     expand_providers: bool
@@ -419,9 +413,9 @@ def _build_rate_params(
     Args:
         base (str): Base currency code used to calculate the rates.
         quotes (str | Iterable[str] | None): Quote currency codes to include.
-        date (str | datetime.date | None): Exact rate date.
-        start_date (str | datetime.date | None): First date of a historical range.
-        end_date (str | datetime.date | None): Last date of a historical range.
+        date (str | Date | None): Exact rate date.
+        start_date (str | Date | None): First date of a historical range.
+        end_date (str | Date | None): Last date of a historical range.
         providers (str | Iterable[str] | None): Provider keys used to filter rates.
         group (str | None): Optional range grouping, either ``week`` or ``month``.
         expand_providers (bool): Whether provider details should be requested.
@@ -508,12 +502,12 @@ def _join_codes(
     return ','.join(codes)
 
 
-def _normalize_date(value: DateLike | None, field_name: str) -> str | None:
+def _normalize_date(value: str | Date | None, field_name: str) -> str | None:
     """
     Convert a supported date value into ISO YYYY-MM-DD format.
 
     Args:
-        value (str | datetime.date | None): Date value to normalize.
+        value (str | Date | None): Date value to normalize.
         field_name (str): Parameter name used in validation error messages.
 
     Returns:
@@ -532,7 +526,7 @@ def _normalize_date(value: DateLike | None, field_name: str) -> str | None:
         raise ValueError(f'{field_name} must use the YYYY-MM-DD format')
 
 
-def _read_error_message(response: Response | None) -> str:
+def _read_error_message(response: requests.Response | None) -> str:
     """
     Read the most useful error message from an HTTP response.
 
