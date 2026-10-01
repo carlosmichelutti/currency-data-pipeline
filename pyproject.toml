@@ -7,11 +7,23 @@ authors = [
     { name = "Carlos Michelutti", email = "carlos.stz590@gmail.com" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "pandas>=2.3,<3",
+    "psycopg[binary]>=3.2,<4",
+    "pyarrow>=21,<22",
+    "pydantic-settings>=2.10,<3",
+    "requests>=2.32,<3",
+]
 
-[project.scripts]
-currency-data-pipeline = "currency_data_pipeline:main"
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.9",
+]
 
 [build-system]
 requires = ["uv_build>=0.12.17,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.uv]
+package = false
