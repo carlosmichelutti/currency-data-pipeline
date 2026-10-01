@@ -47,10 +47,12 @@ RATE_FIELDS = (
 
 METADATA_COLUMNS = (
     '_source_path',
-    '_extension_file',
-    '_number_row',
-    '_batch_id',
-    '_ingested_at'
+    '_source_file',
+    '_source_extension',
+    '_source_row_number',
+    '_ingestion_batch_id',
+    '_ingested_at_utc',
+    '_record_hash'
 )
 
 CURRENCY_COLUMNS = CURRENCY_FIELDS + METADATA_COLUMNS
@@ -444,8 +446,9 @@ def _load_database(
         require_columns(dataframe, columns)
         _reject_rows(
             dataframe,
-            pl.col('_batch_id').is_null() | (pl.col('_batch_id') != batch_id),
-            f'{dataset} _batch_id must match the requested batch'
+            pl.col('_ingestion_batch_id').is_null()
+            | (pl.col('_ingestion_batch_id') != batch_id),
+            f'{dataset} _ingestion_batch_id must match the requested batch'
         )
 
     with database_factory() as database:
@@ -454,14 +457,14 @@ def _load_database(
             'currencies',
             schema=SILVER_SCHEMA,
             where={
-                '_batch_id': batch_id
+                '_ingestion_batch_id': batch_id
             }
         )
         database.delete(
             'rates',
             schema=SILVER_SCHEMA,
             where={
-                '_batch_id': batch_id
+                '_ingestion_batch_id': batch_id
             }
         )
         database.copy_dataframe(
