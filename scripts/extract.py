@@ -61,8 +61,8 @@ class FrankfurterAPIClient:
                 A comma-separated string and an iterable of strings are both accepted.
                 When omitted, the API returns every available quote currency.
             date (str | Date | None): Exact rate date in YYYY-MM-DD format.
-            start_date (str | Date | None): First date of a historical range.
-            end_date (str | Date | None): Last date of a historical range.
+            start_date (str | Date | None): First date of a historical range in YYYY-MM-DD format.
+            end_date (str | Date | None): Last date of a historical range in YYYY-MM-DD format.
             providers (str | Iterable[str] | None): Provider keys used to filter rates.
             group (str | None): Optional range grouping, either ``week`` or ``month``.
             expand_providers (bool): Whether each rate should include provider details.
@@ -72,7 +72,7 @@ class FrankfurterAPIClient:
 
         Raises:
             ValueError: If date filters or query parameters are invalid.
-            FrankfurterError: If the API request or response is invalid.
+            FrankfurterAPIError: If the API request or response is invalid.
         """
         params = _build_rate_params(
             base=base,
@@ -231,8 +231,8 @@ def extract_rates(
         base (str): Base currency code used to calculate the rates.
         quotes (str | Iterable[str] | None): Quote currency codes to include.
         date (str | Date | None): Exact rate date in YYYY-MM-DD format.
-        start_date (str | Date | None): First date of a historical range.
-        end_date (str | Date | None): Last date of a historical range.
+        start_date (str | Date | None): First date of a historical range in YYYY-MM-DD format.
+        end_date (str | Date | None): Last date of a historical range in YYYY-MM-DD format.
         providers (str | Iterable[str] | None): Provider keys used to filter rates.
         group (str | None): Optional range grouping, either ``week`` or ``month``.
         expand_providers (bool): Whether each rate should include provider details.
@@ -280,7 +280,7 @@ def extract_currencies(
 
 def persist_json(data: Any, destination: str | Path) -> str:
     """
-    Persist extracted data as a UTF-8 JSON file using an atomic replacement.
+    Persist extracted data as a UTF-8 JSON file.
 
     Args:
         data (Any): JSON-serializable data returned by an extraction function.
