@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import logging
 import re
@@ -30,10 +31,12 @@ BATCH_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]*$')
 
 METADATA_COLUMNS = [
     '_source_path',
-    '_extension_file',
-    '_number_row',
-    '_batch_id',
-    '_ingested_at'
+    '_source_file',
+    '_source_extension',
+    '_source_row_number',
+    '_ingestion_batch_id',
+    '_ingested_at_utc',
+    '_record_hash'
 ]
 
 CURRENCY_FIELDS = [
@@ -87,26 +90,26 @@ def run_bronze(
     """
     raw_root = Path(raw_dir).resolve()
     bronze_root = Path(bronze_dir).resolve()
-    resolved_batch_id = _resolve_batch_id(raw_root, batch_id)
+    resolved_ingestion_batch_id = _resolve_ingestion_batch_id(raw_root, batch_id)
     ingested_at = datetime.now(TIMEZONE)
 
     source_paths = {
-        dataset: _raw_file(raw_root, dataset, resolved_batch_id)
+        dataset: _raw_file(raw_root, dataset, resolved_ingestion_batch_id)
         for dataset in ('currencies', 'rates')
     }
-    LOGGER.info('Starting bronze ingestion: batch_id=%s', resolved_batch_id)
+    LOGGER.info('Starting bronze ingestion: batch_id=%s', resolved_ingestion_batch_id)
 
     currencies = _read_dataset(
         source_paths['currencies'],
         fields=CURRENCY_FIELDS,
-        batch_id=resolved_batch_id,
+        batch_id=resolved_ingestion_batch_id,
         ingested_at=ingested_at
     )
 
     rates = _read_dataset(
         source_paths['rates'],
         fields=RATE_FIELDS,
-        batch_id=resolved_batch_id,
+        batch_id=resolved_ingestion_batch_id,
         ingested_at=ingested_at
     )
 
@@ -117,13 +120,13 @@ def run_bronze(
         'currencies': (
             bronze_root
             / 'currencies'
-            / resolved_batch_id
+            / resolved_ingestion_batch_id
             / 'currencies.parquet'
         ),
         'rates': (
             bronze_root
             / 'rates'
-            / resolved_batch_id
+            / resolved_ingestion_batch_id
             / 'rates.parquet'
         )
     }
@@ -135,13 +138,13 @@ def run_bronze(
         _load_database(
             currencies,
             rates,
-            batch_id=resolved_batch_id,
+            batch_id=resolved_ingestion_batch_id,
             sql_directory=Path(sql_dir),
             database_factory=database_factory
         )
 
     result = {
-        'batch_id': resolved_batch_id,
+        'batch_id': resolved_ingestion_batch_id,
         'currencies_path': str(output_paths['currencies']),
         'rates_path': str(output_paths['rates']),
         'currencies_rows': len(currencies),
@@ -150,7 +153,7 @@ def run_bronze(
 
     LOGGER.info(
         'Bronze ingestion completed: batch_id=%s currencies=%s rates=%s',
-        resolved_batch_id,
+        resolved_ingestion_batch_id,
         len(currencies),
         len(rates)
     )
@@ -200,10 +203,11 @@ def _read_dataset(
         source_label = source_path.resolve().as_posix()
 
     dataframe['_source_path'] = source_label
-    dataframe['_extension_file'] = source_path.suffix.lower()
-    dataframe['_number_row'] = range(1, len(dataframe) + 1)
-    dataframe['_batch_id'] = batch_id
-    dataframe['_ingested_at'] = pd.Timestamp(ingested_at)
+    dataframe['_source_file'] = source_path.name
+    dataframe['_source_extension'] = source_path.suffix.lower()
+    dataframe['_source_row_number'] = range(1, len(dataframe) + 1)
+    dataframe['_ingestion_batch_id'] = batch_id
+    dataframe['_ingested_at_utc'] = pd.Timestamp(ingested_at)
 
     return dataframe
 
@@ -228,6 +232,12 @@ def _as_raw_text(
     result = dataframe.copy()
     for column in source_columns:
         result[column] = result[column].map(_raw_value_to_text).astype('string')
+
+    result['_record_hash'] = result.apply(
+        _calculate_record_hash,
+        axis=1,
+        source_columns=source_columns
+    )
     return result.loc[:, source_columns + METADATA_COLUMNS]
 
 
@@ -252,6 +262,37 @@ def _raw_value_to_text(value: Any) -> str | None:
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+
+
+def _calculate_record_hash(
+    row: pd.Series,
+    source_columns: list[str]
+) -> str:
+    """
+    Calculate a deterministic SHA-256 hash from a source row.
+
+    Args:
+        row (pd.Series): Row containing source and metadata values.
+        source_columns (list[str]): Ordered source columns included in the hash.
+
+    Returns:
+        str: Lowercase hexadecimal SHA-256 digest of the canonical source data.
+    """
+    source_data = {
+        column: (
+            None
+            if pd.isna(row[column])
+            else str(row[column])
+        )
+        for column in source_columns
+    }
+    encoded_data = json.dumps(
+        source_data,
+        ensure_ascii=False,
+        separators=(',', ':'),
+        sort_keys=True
+    ).encode('utf-8')
+    return hashlib.sha256(encoded_data).hexdigest()
 
 
 def _persist_parquet(dataframe: pd.DataFrame, destination: Path) -> None:
@@ -306,14 +347,14 @@ def _load_database(
             'currencies',
             schema=BRONZE_SCHEMA,
             where={
-                '_batch_id': batch_id
+                '_ingestion_batch_id': batch_id
             }
         )
         database.delete(
             'rates',
             schema=BRONZE_SCHEMA,
             where={
-                '_batch_id': batch_id
+                '_ingestion_batch_id': batch_id
             }
         )
         database.copy_dataframe(
@@ -330,7 +371,7 @@ def _load_database(
         )
 
 
-def _resolve_batch_id(raw_root: Path, batch_id: str | None) -> str:
+def _resolve_ingestion_batch_id(raw_root: Path, batch_id: str | None) -> str:
     """
     Validate an explicit batch or select the newest shared raw batch.
 

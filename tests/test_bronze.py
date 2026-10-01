@@ -77,6 +77,12 @@ class BronzeTests(unittest.TestCase):
                 'base': 'BRL',
                 'quote': 'EUR',
             },
+            {
+                'date': '2026-09-30',
+                'base': 'BRL',
+                'quote': 'USD',
+                'rate': 0.19,
+            },
         ]
 
         with TemporaryDirectory() as directory:
@@ -97,30 +103,40 @@ class BronzeTests(unittest.TestCase):
             currency_frame = pd.read_parquet(result['currencies_path'])
             rate_frame = pd.read_parquet(result['rates_path'])
             self.assertEqual(result['currencies_rows'], 1)
-            self.assertEqual(result['rates_rows'], 2)
-            self.assertEqual(currency_frame.loc[0, '_number_row'], 1)
-            self.assertEqual(currency_frame.loc[0, '_extension_file'], '.json')
-            self.assertEqual(currency_frame.loc[0, '_batch_id'], batch_id)
+            self.assertEqual(result['rates_rows'], 3)
+            self.assertEqual(currency_frame.loc[0, '_source_row_number'], 1)
+            self.assertEqual(currency_frame.loc[0, '_source_file'], 'data.json')
+            self.assertEqual(currency_frame.loc[0, '_source_extension'], '.json')
+            self.assertEqual(currency_frame.loc[0, '_ingestion_batch_id'], batch_id)
             self.assertTrue(currency_frame.loc[0, '_source_path'].endswith('data.json'))
             self.assertEqual(rate_frame.loc[0, 'date'], '2026-09-30')
             self.assertEqual(rate_frame.loc[0, 'rate'], '0.19')
             self.assertTrue(pd.isna(rate_frame.loc[1, 'rate']))
+            self.assertEqual(len(rate_frame.loc[0, '_record_hash']), 64)
+            self.assertEqual(
+                rate_frame.loc[0, '_record_hash'],
+                rate_frame.loc[2, '_record_hash'],
+            )
+            self.assertNotEqual(
+                rate_frame.loc[0, '_record_hash'],
+                rate_frame.loc[1, '_record_hash'],
+            )
             for column in ('date', 'base', 'quote', 'rate'):
                 self.assertTrue(isinstance(rate_frame.dtypes[column], pd.StringDtype))
-            self.assertIsNotNone(currency_frame.loc[0, '_ingested_at'].tzinfo)
-            self.assertIn(('delete', 'bronze', 'currencies', {'_batch_id': batch_id}), database.operations)
-            self.assertIn(('delete', 'bronze', 'rates', {'_batch_id': batch_id}), database.operations)
+            self.assertIsNotNone(currency_frame.loc[0, '_ingested_at_utc'].tzinfo)
+            self.assertIn(('delete', 'bronze', 'currencies', {'_ingestion_batch_id': batch_id}), database.operations)
+            self.assertIn(('delete', 'bronze', 'rates', {'_ingestion_batch_id': batch_id}), database.operations)
             self.assertTrue(
                 any(operation[:4] == ('copy', 'bronze', 'currencies', 1) for operation in database.operations)
             )
             self.assertTrue(
-                any(operation[:4] == ('copy', 'bronze', 'rates', 2) for operation in database.operations)
+                any(operation[:4] == ('copy', 'bronze', 'rates', 3) for operation in database.operations)
             )
             executed_sql = [
                 operation for operation in database.operations
                 if operation[0] == 'execute'
             ]
-            self.assertEqual(len(executed_sql), 4)
+            self.assertEqual(len(executed_sql), 5)
 
     def test_run_bronze_selects_latest_common_batch(self) -> None:
         with TemporaryDirectory() as directory:

@@ -6,9 +6,11 @@ CREATE TABLE IF NOT EXISTS bronze.currencies (
     start_date TEXT,
     end_date TEXT,
     _source_path TEXT NOT NULL,
-    _extension_file TEXT NOT NULL,
-    _number_row BIGINT NOT NULL,
-    _batch_id TEXT NOT NULL,
-    _ingested_at TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (_batch_id, _number_row)
+    _source_file TEXT NOT NULL,
+    _source_extension TEXT NOT NULL,
+    _source_row_number BIGINT NOT NULL,
+    _ingestion_batch_id TEXT NOT NULL,
+    _ingested_at_utc TIMESTAMPTZ NOT NULL,
+    _record_hash TEXT NOT NULL,
+    PRIMARY KEY (_ingestion_batch_id, _source_row_number)
 );
