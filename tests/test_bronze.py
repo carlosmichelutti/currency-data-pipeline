@@ -2,7 +2,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Self
 
 import pandas as pd
 
@@ -14,7 +14,7 @@ class FakeDatabase:
     def __init__(self) -> None:
         self.operations: list[tuple[Any, ...]] = []
 
-    def __enter__(self) -> 'FakeDatabase':
+    def __enter__(self) -> Self:
         self.operations.append(('enter',))
         return self
 
