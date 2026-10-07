@@ -8,7 +8,10 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "apache-airflow==3.3.0; sys_platform != 'win32'",
     "pandas>=2.3,<3",
+    "pendulum>=3.2.0",
+    "polars>=1.0,<2",
     "psycopg[binary]>=3.2,<4",
     "pyarrow>=21,<22",
     "pydantic-settings>=2.10,<3",
@@ -27,3 +30,12 @@ build-backend = "uv_build"
 
 [tool.uv]
 package = false
+# Keep the providers bundled in apache/airflow:3.3.0 compatible with the lock.
+constraint-dependencies = [
+    "cryptography<49",
+    "protobuf<7",
+    "rich<14",
+    "typer<0.26",
+    "websockets<17",
+    "opentelemetry-sdk~=1.43.0",
+]
