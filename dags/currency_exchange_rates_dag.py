@@ -11,6 +11,7 @@ sys.path.insert(0, ROOT_DIR.as_posix())
 
 from scripts.bronze import run_bronze
 from scripts.extract import run_extract
+from scripts.gold import run_gold
 from scripts.silver import run_silver
 
 TIMEZONE = pendulum.timezone('America/Sao_Paulo')
@@ -29,7 +30,7 @@ TIMEZONE = pendulum.timezone('America/Sao_Paulo')
 )
 def currents_rates_dag() -> None:
     """
-    Process currencies and rates through the raw, bronze and silver layers.
+    Process currencies and rates through raw, bronze, silver and gold layers.
 
     Returns:
         None: The function declares the Airflow task dependency graph.
@@ -57,7 +58,9 @@ def currents_rates_dag() -> None:
     run_bronze_task = task(task_id='run_bronze')(run_bronze)
     bronze_result = run_bronze_task(batch_id=extract_result['batch_id'])
     run_silver_task = task(task_id='run_silver')(run_silver)
-    run_silver_task(batch_id=bronze_result['batch_id'])
+    silver_result = run_silver_task(batch_id=bronze_result['batch_id'])
+    run_gold_task = task(task_id='run_gold')(run_gold)
+    run_gold_task(batch_id=silver_result['batch_id'])
 
 
 currents_rates_dag()
