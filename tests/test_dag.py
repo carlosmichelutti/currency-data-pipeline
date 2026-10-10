@@ -22,6 +22,7 @@ class CurrencyPipelineDagTests(unittest.TestCase):
             'run_extract': {'generate_batch_id'},
             'run_bronze': {'run_extract'},
             'run_silver': {'run_bronze'},
+            'run_gold': {'run_silver'},
         }
         self.assertEqual(set(self.dag.task_ids), set(expected_upstream))
         for task_id, upstream in expected_upstream.items():
@@ -33,6 +34,7 @@ class CurrencyPipelineDagTests(unittest.TestCase):
             ('run_extract', 'generate_batch_id'),
             ('run_bronze', 'run_extract'),
             ('run_silver', 'run_bronze'),
+            ('run_gold', 'run_silver'),
         ):
             with self.subTest(task=task_id):
                 batch_argument = self.dag.get_task(task_id).op_kwargs['batch_id']
@@ -40,6 +42,7 @@ class CurrencyPipelineDagTests(unittest.TestCase):
                 self.assertEqual(batch_argument.key, 'return_value' if task_id == 'run_extract' else 'batch_id')
         self.assertTrue(self.dag.get_task('run_extract').multiple_outputs)
         self.assertTrue(self.dag.get_task('run_bronze').multiple_outputs)
+        self.assertTrue(self.dag.get_task('run_silver').multiple_outputs)
 
     def test_batch_uses_logical_date_in_sao_paulo(self) -> None:
         import pendulum
