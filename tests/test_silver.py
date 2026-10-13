@@ -270,15 +270,17 @@ class SilverTests(unittest.TestCase):
         copies = database.copy_dataframe.call_args_list
         self.assertEqual(len(copies), 2)
         currencies, rates = copies[0].args[0], copies[1].args[0]
+        self.assertIsInstance(currencies, pl.DataFrame)
+        self.assertIsInstance(rates, pl.DataFrame)
         self.assertEqual(copies[0].kwargs['columns'], CURRENCY_COLUMNS)
         self.assertEqual(copies[1].kwargs['columns'], RATE_COLUMNS)
         self.assertEqual(copies[0].kwargs['schema'], 'silver')
         self.assertEqual(copies[1].kwargs['schema'], 'silver')
-        self.assertEqual(currencies.loc[0, 'iso_numeric'], '008')
-        self.assertEqual(currencies.loc[0, 'start_date'], date(1998, 7, 7))
-        self.assertIsInstance(currencies.loc[0, 'start_date'], date)
-        self.assertEqual(rates.loc[0, 'rate'], 0.19)
-        self.assertIsNotNone(currencies.loc[0, '_ingested_at_utc'].tzinfo)
+        self.assertEqual(currencies[0, 'iso_numeric'], '008')
+        self.assertEqual(currencies[0, 'start_date'], date(1998, 7, 7))
+        self.assertIsInstance(currencies[0, 'start_date'], date)
+        self.assertEqual(rates[0, 'rate'], 0.19)
+        self.assertIsNotNone(currencies[0, '_ingested_at_utc'].tzinfo)
         database.__exit__.assert_called_once_with(None, None, None)
 
     def test_skip_database_does_not_open_a_connection_or_require_sql(self) -> None:

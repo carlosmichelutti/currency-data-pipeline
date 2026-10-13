@@ -468,13 +468,13 @@ def _load_database(
             }
         )
         database.copy_dataframe(
-            currencies.select(CURRENCY_COLUMNS).to_pandas(use_pyarrow_extension_array=True),
+            currencies.select(CURRENCY_COLUMNS),
             'currencies',
             schema=SILVER_SCHEMA,
             columns=CURRENCY_COLUMNS
         )
         database.copy_dataframe(
-            rates.select(RATE_COLUMNS).to_pandas(use_pyarrow_extension_array=True),
+            rates.select(RATE_COLUMNS),
             'rates',
             schema=SILVER_SCHEMA,
             columns=RATE_COLUMNS
