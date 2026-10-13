@@ -1,13 +1,24 @@
 import json
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Self
+from unittest.mock import MagicMock
 
 import pandas as pd
 
 from database.config import DatabaseSettings
-from scripts.bronze import run_bronze
+from scripts.bronze import (
+    BRONZE_SQL_DIR,
+    METADATA_COLUMNS,
+    RATE_FIELDS,
+    _add_metadata,
+    _as_raw_text,
+    _load_database,
+    _read_dataset,
+    run_bronze,
+)
 
 
 class FakeDatabase:
@@ -53,6 +64,52 @@ class FakeDatabase:
 
 
 class BronzeTests(unittest.TestCase):
+    def test_read_convert_and_enrich_keep_separate_responsibilities(self) -> None:
+        with TemporaryDirectory() as directory:
+            raw = Path(directory)
+            self._write_raw(raw, 'rates', 'batch-1', [{
+                'date': '2026-10-13',
+                'base': 'BRL',
+                'quote': 'USD',
+                'rate': None,
+            }])
+            source_path = raw / 'rates' / 'batch_id=batch-1' / 'data.json'
+            source = _read_dataset(source_path, RATE_FIELDS)
+            text = _as_raw_text(source, RATE_FIELDS)
+            self.assertEqual(list(source.columns), RATE_FIELDS)
+            self.assertEqual(list(text.columns), RATE_FIELDS)
+            self.assertTrue(all(isinstance(dtype, pd.StringDtype) for dtype in text.dtypes))
+
+            ingested_at = datetime(2026, 10, 13, tzinfo=timezone.utc)
+            enriched = _add_metadata(
+                text, source_path, RATE_FIELDS, 'batch-1', ingested_at,
+            )
+            another_batch = _add_metadata(
+                text, raw / 'another.json', RATE_FIELDS, 'batch-2',
+                datetime(2026, 10, 14, tzinfo=timezone.utc),
+            )
+            pd.testing.assert_frame_equal(enriched[RATE_FIELDS], text)
+            self.assertEqual(list(text.columns), RATE_FIELDS)
+            self.assertEqual(list(enriched.columns), RATE_FIELDS + METADATA_COLUMNS)
+            self.assertEqual(enriched.loc[0, '_source_file'], 'data.json')
+            self.assertEqual(enriched.loc[0, '_ingestion_batch_id'], 'batch-1')
+            self.assertEqual(enriched.loc[0, '_ingested_at_utc'], pd.Timestamp(ingested_at))
+            self.assertEqual(
+                enriched.loc[0, '_record_hash'],
+                another_batch.loc[0, '_record_hash'],
+            )
+
+    def test_empty_dataset_keeps_source_and_metadata_schema(self) -> None:
+        source = pd.DataFrame(columns=RATE_FIELDS)
+        text = _as_raw_text(source, RATE_FIELDS)
+        result = _add_metadata(
+            text, Path('data.json'), RATE_FIELDS, 'empty',
+            datetime(2026, 10, 13, tzinfo=timezone.utc),
+        )
+        self.assertTrue(result.empty)
+        self.assertEqual(list(result.columns), RATE_FIELDS + METADATA_COLUMNS)
+        self.assertIsInstance(result['_record_hash'].dtype, pd.StringDtype)
+
     def test_run_bronze_writes_raw_text_and_replaces_database_batch(self) -> None:
         batch_id = '20260930104015'
         currencies = [
@@ -93,12 +150,40 @@ class BronzeTests(unittest.TestCase):
             self._write_raw(raw, 'rates', batch_id, rates)
             database = FakeDatabase()
 
-            result = run_bronze(
-                batch_id=batch_id,
-                raw_dir=raw,
-                bronze_dir=bronze,
-                database_factory=lambda: database,
-            )
+            with self.assertLogs('scripts.bronze', level='INFO') as captured:
+                result = run_bronze(
+                    batch_id=batch_id,
+                    raw_dir=raw,
+                    bronze_dir=bronze,
+                    database_factory=lambda: database,
+                )
+
+            messages = [record.getMessage() for record in captured.records]
+            for dataset, rows in (('currencies', 1), ('rates', 3)):
+                self.assertTrue(any(
+                    f'Raw dataset read: dataset={dataset} batch_id={batch_id} rows={rows}' in message
+                    for message in messages
+                ))
+                self.assertTrue(any(
+                    f'Bronze Parquet persisted: dataset={dataset} rows={rows}' in message
+                    for message in messages
+                ))
+                self.assertTrue(any(
+                    f'PostgreSQL load committed: dataset={dataset} batch_id={batch_id} '
+                    f'table=bronze.{dataset} rows={rows}' in message
+                    for message in messages
+                ))
+            metadata_messages = [
+                message for message in messages
+                if message.startswith('Adding ingestion metadata and record hashes:')
+            ]
+            self.assertEqual(len(metadata_messages), 2)
+            for sql_file in BRONZE_SQL_DIR.glob('*.sql'):
+                self.assertTrue(any(
+                    message.startswith('Bronze DDL executed:')
+                    and sql_file.name in message
+                    for message in messages
+                ))
 
             currency_frame = pd.read_parquet(result['currencies_path'])
             rate_frame = pd.read_parquet(result['rates_path'])
@@ -137,6 +222,27 @@ class BronzeTests(unittest.TestCase):
                 if operation[0] == 'execute'
             ]
             self.assertEqual(len(executed_sql), 5)
+
+    def test_commit_failure_does_not_log_successful_database_load(self) -> None:
+        database = MagicMock()
+        database.__enter__.return_value = database
+        database.__exit__.side_effect = RuntimeError('commit failed')
+        database.copy_dataframe.return_value = 0
+
+        with (
+            self.assertLogs('scripts.bronze', level='INFO') as captured,
+            self.assertRaisesRegex(RuntimeError, 'commit failed'),
+        ):
+            _load_database(
+                pd.DataFrame(), pd.DataFrame(), 'batch-1',
+                BRONZE_SQL_DIR, lambda: database,
+            )
+
+        self.assertEqual(database.copy_dataframe.call_count, 2)
+        self.assertFalse(any(
+            'PostgreSQL load committed:' in record.getMessage()
+            for record in captured.records
+        ))
 
     def test_run_bronze_selects_latest_common_batch(self) -> None:
         with TemporaryDirectory() as directory:

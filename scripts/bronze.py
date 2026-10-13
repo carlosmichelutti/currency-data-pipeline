@@ -13,7 +13,7 @@ from uuid import uuid4
 import pandas as pd
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-sys.path.insert(0, ROOT_DIR.as_posix())
+sys.path.insert(0, str(ROOT_DIR))
 
 from database import PostgresDatabase, execute_sql_directory
 
@@ -100,21 +100,44 @@ def run_bronze(
     LOGGER.info('Starting bronze ingestion: batch_id=%s', resolved_ingestion_batch_id)
 
     currencies = _read_dataset(
-        source_paths['currencies'],
-        fields=CURRENCY_FIELDS,
-        batch_id=resolved_ingestion_batch_id,
-        ingested_at=ingested_at
+        source_path=source_paths['currencies'],
+        fields=CURRENCY_FIELDS
+    )
+    LOGGER.info(
+        'Raw dataset read: dataset=currencies batch_id=%s rows=%s path=%s',
+        resolved_ingestion_batch_id,
+        len(currencies),
+        source_paths['currencies']
     )
 
     rates = _read_dataset(
-        source_paths['rates'],
-        fields=RATE_FIELDS,
-        batch_id=resolved_ingestion_batch_id,
-        ingested_at=ingested_at
+        source_path=source_paths['rates'],
+        fields=RATE_FIELDS
+    )
+    LOGGER.info(
+        'Raw dataset read: dataset=rates batch_id=%s rows=%s path=%s',
+        resolved_ingestion_batch_id,
+        len(rates),
+        source_paths['rates']
     )
 
     currencies = _as_raw_text(currencies, CURRENCY_FIELDS)
     rates = _as_raw_text(rates, RATE_FIELDS)
+
+    currencies = _add_metadata(
+        dataframe=currencies,
+        source_path=source_paths['currencies'],
+        source_columns=CURRENCY_FIELDS,
+        batch_id=resolved_ingestion_batch_id,
+        ingested_at=ingested_at
+    )
+    rates = _add_metadata(
+        dataframe=rates,
+        source_path=source_paths['rates'],
+        source_columns=RATE_FIELDS,
+        batch_id=resolved_ingestion_batch_id,
+        ingested_at=ingested_at
+    )
 
     output_paths = {
         'currencies': (
@@ -136,11 +159,15 @@ def run_bronze(
 
     if persist_database:
         _load_database(
-            currencies,
-            rates,
+            currencies=currencies,
+            rates=rates,
             batch_id=resolved_ingestion_batch_id,
             sql_directory=Path(sql_dir),
             database_factory=database_factory
+        )
+    else:
+        LOGGER.info(
+            'PostgreSQL load skipped: batch_id=%s', resolved_ingestion_batch_id
         )
 
     result = {
@@ -162,27 +189,24 @@ def run_bronze(
 
 def _read_dataset(
     source_path: Path,
-    fields: list[str],
-    batch_id: str,
-    ingested_at: datetime
+    fields: list[str]
 ) -> pd.DataFrame:
     """
-    Read a raw JSON array and append operational lineage metadata.
+    Read a raw JSON array into a DataFrame of source fields.
 
     Args:
         source_path (Path): JSON file containing the source records.
-        fields (list[str]): Source fields copied into the bronze DataFrame.
-        batch_id (str): Identifier assigned to every row in the batch.
-        ingested_at (datetime): Timestamp assigned to every row.
+        fields (list[str]): Source fields copied into the DataFrame.
 
     Returns:
-        pd.DataFrame: Source fields plus ingestion metadata, without
+        pd.DataFrame: Source fields read from the JSON file, without
             semantic conversion of the source values.
 
     Raises:
         ValueError: If the file is invalid JSON or its root is not an array of
             JSON objects.
     """
+    LOGGER.info('Reading raw JSON file: path=%s', source_path)
     try:
         payload = json.loads(
             source_path.read_text(encoding='utf-8'),
@@ -196,20 +220,58 @@ def _read_dataset(
     ):
         raise ValueError(f'{source_path} must contain a JSON array of objects')
 
-    dataframe = pd.DataFrame(payload, columns=fields)
+    return pd.DataFrame(payload, columns=fields)
+
+
+def _add_metadata(
+    dataframe: pd.DataFrame,
+    source_path: Path,
+    source_columns: list[str],
+    batch_id: str,
+    ingested_at: datetime
+) -> pd.DataFrame:
+    """
+    Append ingestion metadata and a deterministic hash to each source row.
+
+    Args:
+        dataframe (pd.DataFrame): Source records represented as nullable text.
+        source_path (Path): JSON file from which the records were read.
+        source_columns (list[str]): Source columns included in the record hash
+            and returned before the metadata columns.
+        batch_id (str): Identifier assigned to every row in the batch.
+        ingested_at (datetime): Timestamp assigned to every row.
+
+    Returns:
+        pd.DataFrame: Copy containing source fields followed by all ingestion
+            metadata columns, including the SHA-256 record hash.
+    """
+    LOGGER.info(
+        'Adding ingestion metadata and record hashes: batch_id=%s rows=%s path=%s',
+        batch_id,
+        len(dataframe),
+        source_path
+    )
+    result = dataframe.copy()
     try:
         source_label = source_path.resolve().relative_to(ROOT_DIR).as_posix()
     except ValueError:
         source_label = source_path.resolve().as_posix()
 
-    dataframe['_source_path'] = source_label
-    dataframe['_source_file'] = source_path.name
-    dataframe['_source_extension'] = source_path.suffix.lower()
-    dataframe['_source_row_number'] = range(1, len(dataframe) + 1)
-    dataframe['_ingestion_batch_id'] = batch_id
-    dataframe['_ingested_at_utc'] = pd.Timestamp(ingested_at)
-
-    return dataframe
+    result['_source_path'] = source_label
+    result['_source_file'] = source_path.name
+    result['_source_extension'] = source_path.suffix.lower()
+    result['_source_row_number'] = range(1, len(result) + 1)
+    result['_ingestion_batch_id'] = batch_id
+    result['_ingested_at_utc'] = pd.Timestamp(ingested_at)
+    result['_record_hash'] = pd.Series(
+        [
+            _calculate_record_hash(row, source_columns)
+            for _, row in result.iterrows()
+        ],
+        index=result.index,
+        dtype='string'
+    )
+    return result.loc[:, source_columns + METADATA_COLUMNS]
 
 
 def _as_raw_text(
@@ -220,25 +282,19 @@ def _as_raw_text(
     Represent every source value as text without semantic type coercion.
 
     Args:
-        dataframe (pd.DataFrame): DataFrame containing source and metadata
-            columns.
+        dataframe (pd.DataFrame): DataFrame containing source columns.
         source_columns (list[str]): Columns originating from the source API and
             therefore stored as nullable text in bronze.
 
     Returns:
-        pd.DataFrame: Copy whose source columns use pandas' nullable string
-            dtype while metadata keeps its operational type.
+        pd.DataFrame: Selected source columns represented using pandas nullable
+            string dtype.
     """
     result = dataframe.copy()
     for column in source_columns:
         result[column] = result[column].map(_raw_value_to_text).astype('string')
 
-    result['_record_hash'] = result.apply(
-        _calculate_record_hash,
-        axis=1,
-        source_columns=source_columns
-    )
-    return result.loc[:, source_columns + METADATA_COLUMNS]
+    return result.loc[:, source_columns]
 
 
 def _raw_value_to_text(value: Any) -> str | None:
@@ -316,8 +372,16 @@ def _persist_parquet(dataframe: pd.DataFrame, destination: Path) -> None:
         dataframe.to_parquet(temporary_path, engine='pyarrow', index=False)
         temporary_path.replace(destination)
     except Exception:
+        LOGGER.exception('Failed to persist bronze Parquet: path=%s', destination)
         temporary_path.unlink(missing_ok=True)
         raise
+
+    LOGGER.info(
+        'Bronze Parquet persisted: dataset=%s rows=%s path=%s',
+        destination.stem,
+        len(dataframe),
+        destination
+    )
 
 
 def _load_database(
@@ -341,34 +405,81 @@ def _load_database(
     Returns:
         None: The database transaction is committed by the facade context.
     """
+    LOGGER.info(
+        'Starting bronze PostgreSQL load: batch_id=%s schema=%s',
+        batch_id,
+        BRONZE_SCHEMA
+    )
     with database_factory() as database:
-        execute_sql_directory(database, sql_directory)
+        LOGGER.info(
+            'Executing bronze DDL files: batch_id=%s directory=%s',
+            batch_id,
+            sql_directory
+        )
+        executed_files = execute_sql_directory(database, sql_directory)
+        for sql_file in executed_files:
+            LOGGER.info(
+                'Bronze DDL executed: batch_id=%s file=%s transaction=pending',
+                batch_id,
+                sql_file
+            )
+        LOGGER.info(
+            'Replacing existing bronze batch: batch_id=%s tables=%s.currencies,%s.rates',
+            batch_id,
+            BRONZE_SCHEMA,
+            BRONZE_SCHEMA
+        )
         database.delete(
-            'currencies',
+            table_name='currencies',
             schema=BRONZE_SCHEMA,
             where={
                 '_ingestion_batch_id': batch_id
             }
         )
         database.delete(
-            'rates',
+            table_name='rates',
             schema=BRONZE_SCHEMA,
             where={
                 '_ingestion_batch_id': batch_id
             }
         )
-        database.copy_dataframe(
-            currencies,
-            'currencies',
+        LOGGER.info(
+            'Starting COPY: dataset=currencies batch_id=%s table=%s.currencies rows=%s',
+            batch_id,
+            BRONZE_SCHEMA,
+            len(currencies)
+        )
+        currencies_rows = database.copy_dataframe(
+            dataframe=currencies,
+            table_name='currencies',
             schema=BRONZE_SCHEMA,
             columns=CURRENCY_COLUMNS
         )
-        database.copy_dataframe(
-            rates,
-            'rates',
+        LOGGER.info(
+            'Starting COPY: dataset=rates batch_id=%s table=%s.rates rows=%s',
+            batch_id,
+            BRONZE_SCHEMA,
+            len(rates)
+        )
+        rates_rows = database.copy_dataframe(
+            dataframe=rates,
+            table_name='rates',
             schema=BRONZE_SCHEMA,
             columns=RATE_COLUMNS
         )
+
+    LOGGER.info(
+        'PostgreSQL load committed: dataset=currencies batch_id=%s table=%s.currencies rows=%s',
+        batch_id,
+        BRONZE_SCHEMA,
+        currencies_rows
+    )
+    LOGGER.info(
+        'PostgreSQL load committed: dataset=rates batch_id=%s table=%s.rates rows=%s',
+        batch_id,
+        BRONZE_SCHEMA,
+        rates_rows
+    )
 
 
 def _resolve_ingestion_batch_id(raw_root: Path, batch_id: str | None) -> str:
