@@ -1,13 +1,13 @@
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-import pandas as pd
+import polars as pl
 from psycopg import Connection, sql
 
 
 def copy_dataframe(
     connection: Connection[Any],
-    dataframe: pd.DataFrame,
+    dataframe: pl.DataFrame,
     table_name: str,
     schema: str | None = None,
     columns: Sequence[str] | None = None
@@ -18,7 +18,7 @@ def copy_dataframe(
     Args:
         connection (Connection[Any]): Active connection that owns the COPY
             transaction.
-        dataframe (pd.DataFrame): Rows to load into PostgreSQL.
+        dataframe (pl.DataFrame): Rows to load into PostgreSQL.
         table_name (str): Destination table name.
         schema (str | None): Destination schema, or ``None`` to use the active
             PostgreSQL search path.
@@ -53,11 +53,8 @@ def copy_dataframe(
     )
 
     with connection.cursor() as cursor, cursor.copy(statement) as copy:
-        for row in dataframe.loc[:, selected_columns].itertuples(
-            index=False,
-            name=None
-        ):
-            copy.write_row(tuple(_to_python(value) for value in row))
+        for row in dataframe.select(selected_columns).iter_rows():
+            copy.write_row(row)
 
     return len(dataframe)
 
@@ -147,35 +144,12 @@ def insert_rows(
             )
 
     parameters = [
-        tuple(_to_python(row[column]) for column in columns)
+        tuple(row[column] for column in columns)
         for row in materialized_rows
     ]
     with connection.cursor() as cursor:
         cursor.executemany(statement, parameters)
     return len(materialized_rows)
-
-
-def _to_python(value: Any) -> Any:
-    """
-    Convert a pandas or numpy scalar into an object psycopg can adapt.
-
-    Args:
-        value (Any): Scalar value read from a DataFrame or row mapping.
-
-    Returns:
-        Any: Native Python scalar, datetime, ``None``, or the original value.
-    """
-    if value is None or value is pd.NA:
-        return None
-    try:
-        if pd.isna(value):
-            return None
-    except (TypeError, ValueError):
-        pass
-    if isinstance(value, pd.Timestamp):
-        return value.to_pydatetime()
-    item = getattr(value, 'item', None)
-    return item() if callable(item) else value
 
 
 def _validate_identifier(value: str, field_name: str) -> None:

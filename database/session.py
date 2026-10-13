@@ -2,7 +2,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from types import TracebackType
 from typing import Any, Self
 
-import pandas as pd
+import polars as pl
 import psycopg
 from psycopg import Connection, sql
 from psycopg.abc import Query
@@ -236,7 +236,7 @@ class PostgresDatabase:
 
     def copy_dataframe(
         self,
-        dataframe: pd.DataFrame,
+        dataframe: pl.DataFrame,
         table_name: str,
         schema: str | None = None,
         columns: Sequence[str] | None = None
@@ -245,7 +245,7 @@ class PostgresDatabase:
         Load a DataFrame using PostgreSQL ``COPY FROM STDIN``.
 
         Args:
-            dataframe (pd.DataFrame): Rows to load.
+            dataframe (pl.DataFrame): Rows to load.
             table_name (str): Destination table name.
             schema (str | None): Destination schema, or ``None`` to use the
                 active PostgreSQL search path.
