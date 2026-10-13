@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import re
 import sys
 from collections.abc import Callable
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-import pandas as pd
+import polars as pl
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR))
@@ -190,7 +191,7 @@ def run_bronze(
 def _read_dataset(
     source_path: Path,
     fields: list[str]
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """
     Read a raw JSON array into a DataFrame of source fields.
 
@@ -199,8 +200,9 @@ def _read_dataset(
         fields (list[str]): Source fields copied into the DataFrame.
 
     Returns:
-        pd.DataFrame: Source fields read from the JSON file, without
-            semantic conversion of the source values.
+        pl.DataFrame: Source fields read from the JSON file, without
+            semantic conversion of the source values. Object columns preserve the
+            decoded JSON values until text conversion.
 
     Raises:
         ValueError: If the file is invalid JSON or its root is not an array of
@@ -220,21 +222,26 @@ def _read_dataset(
     ):
         raise ValueError(f'{source_path} must contain a JSON array of objects')
 
-    return pd.DataFrame(payload, columns=fields)
+    return pl.DataFrame({
+        column: pl.Series(
+            column, [record.get(column) for record in payload], dtype=pl.Object
+        )
+        for column in fields
+    })
 
 
 def _add_metadata(
-    dataframe: pd.DataFrame,
+    dataframe: pl.DataFrame,
     source_path: Path,
     source_columns: list[str],
     batch_id: str,
     ingested_at: datetime
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """
     Append ingestion metadata and a deterministic hash to each source row.
 
     Args:
-        dataframe (pd.DataFrame): Source records represented as nullable text.
+        dataframe (pl.DataFrame): Source records represented as nullable text.
         source_path (Path): JSON file from which the records were read.
         source_columns (list[str]): Source columns included in the record hash
             and returned before the metadata columns.
@@ -242,7 +249,7 @@ def _add_metadata(
         ingested_at (datetime): Timestamp assigned to every row.
 
     Returns:
-        pd.DataFrame: Copy containing source fields followed by all ingestion
+        pl.DataFrame: Copy containing source fields followed by all ingestion
             metadata columns, including the SHA-256 record hash.
     """
     LOGGER.info(
@@ -251,50 +258,47 @@ def _add_metadata(
         len(dataframe),
         source_path
     )
-    result = dataframe.copy()
     try:
         source_label = source_path.resolve().relative_to(ROOT_DIR).as_posix()
     except ValueError:
         source_label = source_path.resolve().as_posix()
 
-    result['_source_path'] = source_label
-    result['_source_file'] = source_path.name
-    result['_source_extension'] = source_path.suffix.lower()
-    result['_source_row_number'] = range(1, len(result) + 1)
-    result['_ingestion_batch_id'] = batch_id
-    result['_ingested_at_utc'] = pd.Timestamp(ingested_at)
-    result['_record_hash'] = pd.Series(
-        [
-            _calculate_record_hash(row, source_columns)
-            for _, row in result.iterrows()
-        ],
-        index=result.index,
-        dtype='string'
-    )
-    return result.loc[:, source_columns + METADATA_COLUMNS]
+    return dataframe.with_columns(
+        pl.lit(source_label).alias('_source_path'),
+        pl.lit(source_path.name).alias('_source_file'),
+        pl.lit(source_path.suffix.lower()).alias('_source_extension'),
+        pl.int_range(1, pl.len() + 1, dtype=pl.Int64).alias('_source_row_number'),
+        pl.lit(batch_id).alias('_ingestion_batch_id'),
+        pl.lit(ingested_at).cast(pl.Datetime('us', 'UTC')).alias('_ingested_at_utc'),
+        pl.struct(source_columns).map_elements(
+            lambda row: _calculate_record_hash(row, source_columns),
+            return_dtype=pl.String
+        ).alias('_record_hash')
+    ).select(source_columns + METADATA_COLUMNS)
 
 
 def _as_raw_text(
-    dataframe: pd.DataFrame,
+    dataframe: pl.DataFrame,
     source_columns: list[str]
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """
     Represent every source value as text without semantic type coercion.
 
     Args:
-        dataframe (pd.DataFrame): DataFrame containing source columns.
+        dataframe (pl.DataFrame): DataFrame containing source columns.
         source_columns (list[str]): Columns originating from the source API and
             therefore stored as nullable text in bronze.
 
     Returns:
-        pd.DataFrame: Selected source columns represented using pandas nullable
-            string dtype.
+        pl.DataFrame: Selected source columns represented using Polars nullable
+            String dtype.
     """
-    result = dataframe.copy()
-    for column in source_columns:
-        result[column] = result[column].map(_raw_value_to_text).astype('string')
-
-    return result.loc[:, source_columns]
+    return dataframe.select(
+        pl.col(column).map_elements(
+            _raw_value_to_text, return_dtype=pl.String
+        ).alias(column)
+        for column in source_columns
+    )
 
 
 def _raw_value_to_text(value: Any) -> str | None:
@@ -308,27 +312,22 @@ def _raw_value_to_text(value: Any) -> str | None:
         str | None: Original string, compact JSON for non-string values, or
             ``None`` for JSON null.
     """
-    if value is None or value is pd.NA:
+    if value is None or (isinstance(value, float) and math.isnan(value)):
         return None
-    try:
-        if pd.isna(value):
-            return None
-    except (TypeError, ValueError):
-        pass
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
 
 
 def _calculate_record_hash(
-    row: pd.Series,
+    row: dict[str, Any],
     source_columns: list[str]
 ) -> str:
     """
     Calculate a deterministic SHA-256 hash from a source row.
 
     Args:
-        row (pd.Series): Row containing source and metadata values.
+        row (dict[str, Any]): Row containing source and metadata values.
         source_columns (list[str]): Ordered source columns included in the hash.
 
     Returns:
@@ -337,7 +336,7 @@ def _calculate_record_hash(
     source_data = {
         column: (
             None
-            if pd.isna(row[column])
+            if row[column] is None
             else str(row[column])
         )
         for column in source_columns
@@ -351,12 +350,12 @@ def _calculate_record_hash(
     return hashlib.sha256(encoded_data).hexdigest()
 
 
-def _persist_parquet(dataframe: pd.DataFrame, destination: Path) -> None:
+def _persist_parquet(dataframe: pl.DataFrame, destination: Path) -> None:
     """
     Write a DataFrame atomically to a Parquet destination.
 
     Args:
-        dataframe (pd.DataFrame): Bronze rows to persist.
+        dataframe (pl.DataFrame): Bronze rows to persist.
         destination (Path): Final Parquet file path.
 
     Returns:
@@ -369,7 +368,7 @@ def _persist_parquet(dataframe: pd.DataFrame, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = destination.with_name(f'.{destination.name}.{uuid4().hex}.tmp')
     try:
-        dataframe.to_parquet(temporary_path, engine='pyarrow', index=False)
+        dataframe.write_parquet(temporary_path)
         temporary_path.replace(destination)
     except Exception:
         LOGGER.exception('Failed to persist bronze Parquet: path=%s', destination)
@@ -385,8 +384,8 @@ def _persist_parquet(dataframe: pd.DataFrame, destination: Path) -> None:
 
 
 def _load_database(
-    currencies: pd.DataFrame,
-    rates: pd.DataFrame,
+    currencies: pl.DataFrame,
+    rates: pl.DataFrame,
     batch_id: str,
     sql_directory: Path,
     database_factory: Callable[[], PostgresDatabase]
@@ -395,8 +394,8 @@ def _load_database(
     Create bronze objects and replace one batch transactionally.
 
     Args:
-        currencies (pd.DataFrame): Currency rows prepared for ``COPY``.
-        rates (pd.DataFrame): Exchange-rate rows prepared for ``COPY``.
+        currencies (pl.DataFrame): Currency rows prepared for ``COPY``.
+        rates (pl.DataFrame): Exchange-rate rows prepared for ``COPY``.
         batch_id (str): Batch removed and reloaded in both tables.
         sql_directory (Path): Directory containing ordered bronze DDL.
         database_factory (Callable[[], PostgresDatabase]): Factory for the

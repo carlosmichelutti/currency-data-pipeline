@@ -1,3 +1,4 @@
+import hashlib
 import json
 import unittest
 from datetime import datetime, timezone
@@ -6,7 +7,8 @@ from tempfile import TemporaryDirectory
 from typing import Any, Self
 from unittest.mock import MagicMock
 
-import pandas as pd
+import polars as pl
+from polars.testing import assert_frame_equal
 
 from database.config import DatabaseSettings
 from scripts.bronze import (
@@ -51,12 +53,13 @@ class FakeDatabase:
 
     def copy_dataframe(
         self,
-        dataframe: pd.DataFrame,
+        dataframe: pl.DataFrame,
         table_name: str,
         *,
         schema: str | None = None,
         columns: list[str] | None = None,
     ) -> int:
+        assert isinstance(dataframe, pl.DataFrame)
         self.operations.append(
             ('copy', schema, table_name, len(dataframe), tuple(columns or ()))
         )
@@ -64,6 +67,36 @@ class FakeDatabase:
 
 
 class BronzeTests(unittest.TestCase):
+    def test_polars_preserves_raw_values_and_existing_hash_format(self) -> None:
+        fields = ['numeric', 'missing', 'literal_null', 'unicode', 'nested']
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'data.json'
+            path.write_text(
+                '[{"numeric":0.1900e+00,"missing":null,"literal_null":"null",'
+                '"unicode":"São Paulo","nested":{"enabled":true,"codes":["008",null]}}]',
+                encoding='utf-8',
+            )
+            text = _as_raw_text(_read_dataset(path, fields), fields)
+            enriched = _add_metadata(
+                text, path, fields, 'batch-1',
+                datetime(2026, 10, 13, tzinfo=timezone.utc),
+            )
+
+        expected_source = {
+            'numeric': '0.1900e+00',
+            'missing': None,
+            'literal_null': 'null',
+            'unicode': 'São Paulo',
+            'nested': '{"enabled":true,"codes":["008",null]}',
+        }
+        self.assertEqual(text.row(0, named=True), expected_source)
+        expected_hash = hashlib.sha256(json.dumps(
+            expected_source, ensure_ascii=False, separators=(',', ':'), sort_keys=True,
+        ).encode('utf-8')).hexdigest()
+        self.assertEqual(enriched[0, '_record_hash'], expected_hash)
+        self.assertEqual(enriched.schema['_ingested_at_utc'], pl.Datetime('us', 'UTC'))
+        self.assertEqual(enriched.schema['_source_row_number'], pl.Int64)
+
     def test_read_convert_and_enrich_keep_separate_responsibilities(self) -> None:
         with TemporaryDirectory() as directory:
             raw = Path(directory)
@@ -78,7 +111,7 @@ class BronzeTests(unittest.TestCase):
             text = _as_raw_text(source, RATE_FIELDS)
             self.assertEqual(list(source.columns), RATE_FIELDS)
             self.assertEqual(list(text.columns), RATE_FIELDS)
-            self.assertTrue(all(isinstance(dtype, pd.StringDtype) for dtype in text.dtypes))
+            self.assertTrue(all(dtype == pl.String for dtype in text.dtypes))
 
             ingested_at = datetime(2026, 10, 13, tzinfo=timezone.utc)
             enriched = _add_metadata(
@@ -88,27 +121,27 @@ class BronzeTests(unittest.TestCase):
                 text, raw / 'another.json', RATE_FIELDS, 'batch-2',
                 datetime(2026, 10, 14, tzinfo=timezone.utc),
             )
-            pd.testing.assert_frame_equal(enriched[RATE_FIELDS], text)
+            assert_frame_equal(enriched.select(RATE_FIELDS), text)
             self.assertEqual(list(text.columns), RATE_FIELDS)
             self.assertEqual(list(enriched.columns), RATE_FIELDS + METADATA_COLUMNS)
-            self.assertEqual(enriched.loc[0, '_source_file'], 'data.json')
-            self.assertEqual(enriched.loc[0, '_ingestion_batch_id'], 'batch-1')
-            self.assertEqual(enriched.loc[0, '_ingested_at_utc'], pd.Timestamp(ingested_at))
+            self.assertEqual(enriched[0, '_source_file'], 'data.json')
+            self.assertEqual(enriched[0, '_ingestion_batch_id'], 'batch-1')
+            self.assertEqual(enriched[0, '_ingested_at_utc'], ingested_at)
             self.assertEqual(
-                enriched.loc[0, '_record_hash'],
-                another_batch.loc[0, '_record_hash'],
+                enriched[0, '_record_hash'],
+                another_batch[0, '_record_hash'],
             )
 
     def test_empty_dataset_keeps_source_and_metadata_schema(self) -> None:
-        source = pd.DataFrame(columns=RATE_FIELDS)
+        source = pl.DataFrame(schema=dict.fromkeys(RATE_FIELDS, pl.Object))
         text = _as_raw_text(source, RATE_FIELDS)
         result = _add_metadata(
             text, Path('data.json'), RATE_FIELDS, 'empty',
             datetime(2026, 10, 13, tzinfo=timezone.utc),
         )
-        self.assertTrue(result.empty)
+        self.assertTrue(result.is_empty())
         self.assertEqual(list(result.columns), RATE_FIELDS + METADATA_COLUMNS)
-        self.assertIsInstance(result['_record_hash'].dtype, pd.StringDtype)
+        self.assertEqual(result.schema['_record_hash'], pl.String)
 
     def test_run_bronze_writes_raw_text_and_replaces_database_batch(self) -> None:
         batch_id = '20260930104015'
@@ -185,30 +218,30 @@ class BronzeTests(unittest.TestCase):
                     for message in messages
                 ))
 
-            currency_frame = pd.read_parquet(result['currencies_path'])
-            rate_frame = pd.read_parquet(result['rates_path'])
+            currency_frame = pl.read_parquet(result['currencies_path'])
+            rate_frame = pl.read_parquet(result['rates_path'])
             self.assertEqual(result['currencies_rows'], 1)
             self.assertEqual(result['rates_rows'], 3)
-            self.assertEqual(currency_frame.loc[0, '_source_row_number'], 1)
-            self.assertEqual(currency_frame.loc[0, '_source_file'], 'data.json')
-            self.assertEqual(currency_frame.loc[0, '_source_extension'], '.json')
-            self.assertEqual(currency_frame.loc[0, '_ingestion_batch_id'], batch_id)
-            self.assertTrue(currency_frame.loc[0, '_source_path'].endswith('data.json'))
-            self.assertEqual(rate_frame.loc[0, 'date'], '2026-09-30')
-            self.assertEqual(rate_frame.loc[0, 'rate'], '0.19')
-            self.assertTrue(pd.isna(rate_frame.loc[1, 'rate']))
-            self.assertEqual(len(rate_frame.loc[0, '_record_hash']), 64)
+            self.assertEqual(currency_frame[0, '_source_row_number'], 1)
+            self.assertEqual(currency_frame[0, '_source_file'], 'data.json')
+            self.assertEqual(currency_frame[0, '_source_extension'], '.json')
+            self.assertEqual(currency_frame[0, '_ingestion_batch_id'], batch_id)
+            self.assertTrue(currency_frame[0, '_source_path'].endswith('data.json'))
+            self.assertEqual(rate_frame[0, 'date'], '2026-09-30')
+            self.assertEqual(rate_frame[0, 'rate'], '0.19')
+            self.assertIsNone(rate_frame[1, 'rate'])
+            self.assertEqual(len(rate_frame[0, '_record_hash']), 64)
             self.assertEqual(
-                rate_frame.loc[0, '_record_hash'],
-                rate_frame.loc[2, '_record_hash'],
+                rate_frame[0, '_record_hash'],
+                rate_frame[2, '_record_hash'],
             )
             self.assertNotEqual(
-                rate_frame.loc[0, '_record_hash'],
-                rate_frame.loc[1, '_record_hash'],
+                rate_frame[0, '_record_hash'],
+                rate_frame[1, '_record_hash'],
             )
             for column in ('date', 'base', 'quote', 'rate'):
-                self.assertTrue(isinstance(rate_frame.dtypes[column], pd.StringDtype))
-            self.assertIsNotNone(currency_frame.loc[0, '_ingested_at_utc'].tzinfo)
+                self.assertEqual(rate_frame.schema[column], pl.String)
+            self.assertIsNotNone(currency_frame[0, '_ingested_at_utc'].tzinfo)
             self.assertIn(('delete', 'bronze', 'currencies', {'_ingestion_batch_id': batch_id}), database.operations)
             self.assertIn(('delete', 'bronze', 'rates', {'_ingestion_batch_id': batch_id}), database.operations)
             self.assertTrue(
@@ -234,7 +267,7 @@ class BronzeTests(unittest.TestCase):
             self.assertRaisesRegex(RuntimeError, 'commit failed'),
         ):
             _load_database(
-                pd.DataFrame(), pd.DataFrame(), 'batch-1',
+                pl.DataFrame(), pl.DataFrame(), 'batch-1',
                 BRONZE_SQL_DIR, lambda: database,
             )
 
