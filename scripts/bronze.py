@@ -144,13 +144,13 @@ def run_bronze(
         'currencies': (
             bronze_root
             / 'currencies'
-            / resolved_ingestion_batch_id
+            / f'batch_id={resolved_ingestion_batch_id}'
             / 'currencies.parquet'
         ),
         'rates': (
             bronze_root
             / 'rates'
-            / resolved_ingestion_batch_id
+            / f'batch_id={resolved_ingestion_batch_id}'
             / 'rates.parquet'
         )
     }
