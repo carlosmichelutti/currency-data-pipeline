@@ -9,12 +9,12 @@ from uuid import uuid4
 
 import polars as pl
 
-LOGGER = logging.getLogger(__name__)
-
 ROOT_DIR = Path(__file__).resolve().parents[1]
-sys.path.insert(0, ROOT_DIR.as_posix())
+sys.path.insert(0, str(ROOT_DIR))
 
 from database import PostgresDatabase, execute_sql_directory
+
+LOGGER = logging.getLogger(__name__)
 
 BRONZE_DIR = ROOT_DIR / 'data' / 'bronze'
 SILVER_DIR = ROOT_DIR / 'data' / 'silver'
@@ -232,7 +232,7 @@ def transform_currencies(dataframe: pl.DataFrame) -> pl.DataFrame:
     require_columns(dataframe, CURRENCY_FIELDS)
     result = dataframe.with_columns(
         clean_text('iso_code', case='upper'),
-        normalize_iso_numeric(),
+        normalize_iso_numeric('iso_numeric'),
         clean_text('name', case='upper', collapse_whitespace=True),
         clean_text('symbol')
     )
@@ -248,6 +248,12 @@ def transform_currencies(dataframe: pl.DataFrame) -> pl.DataFrame:
         result,
         pl.col('start_date') > pl.col('end_date'),
         'start_date must not be after end_date'
+    )
+    LOGGER.info(
+        'Silver dataset transformed: dataset=currencies rows_before=%s rows_processed=%s rows_after=%s',
+        dataframe.height,
+        dataframe.height,
+        result.height
     )
     return result
 
@@ -278,6 +284,12 @@ def transform_rates(dataframe: pl.DataFrame) -> pl.DataFrame:
         | ~pl.col('rate').is_finite()
         | (pl.col('rate') <= 0),
         'rate must be a finite positive number'
+    )
+    LOGGER.info(
+        'Silver dataset transformed: dataset=rates rows_before=%s rows_processed=%s rows_after=%s',
+        dataframe.height,
+        dataframe.height,
+        result.height
     )
     return result
 
@@ -391,15 +403,41 @@ def run_silver(
     for source_path in source_paths.values():
         if not source_path.is_file():
             raise FileNotFoundError(f'Bronze Parquet file not found: {source_path}')
+
     LOGGER.info('Starting silver transformation: batch_id=%s', resolved_batch_id)
-    currencies = transform_currencies(pl.read_parquet(source_paths['currencies']))
-    rates = transform_rates(pl.read_parquet(source_paths['rates']))
+
+    currencies = pl.read_parquet(source_paths['currencies'])
+    LOGGER.info(
+        'Bronze Parquet read: dataset=currencies batch_id=%s path=%s rows=%s',
+        resolved_batch_id,
+        source_paths['currencies'],
+        currencies.height
+    )
+
+    rates = pl.read_parquet(source_paths['rates'])
+    LOGGER.info(
+        'Bronze Parquet read: dataset=rates batch_id=%s path=%s rows=%s',
+        resolved_batch_id,
+        source_paths['rates'],
+        rates.height
+    )
+
+    currencies = transform_currencies(currencies)
+    rates = transform_rates(rates)
+
     frames = {'currencies': currencies, 'rates': rates}
     result: dict[str, str | int] = {'batch_id': resolved_batch_id}
     for dataset, dataframe in frames.items():
         destination = silver_root / dataset / resolved_batch_id / f'{dataset}.parquet'
         result[f'{dataset}_path'] = str(persist_parquet(dataframe, destination))
         result[f'{dataset}_rows'] = dataframe.height
+        LOGGER.info(
+            'Silver Parquet persisted: dataset=%s batch_id=%s path=%s rows=%s',
+            dataset,
+            resolved_batch_id,
+            destination,
+            dataframe.height
+        )
 
     if persist_database:
         _load_database(
@@ -409,10 +447,14 @@ def run_silver(
             sql_directory=Path(sql_dir),
             database_factory=database_factory
         )
+    else:
+        LOGGER.info('Silver PostgreSQL load skipped: batch_id=%s', resolved_batch_id)
 
     LOGGER.info(
         'Silver transformation completed: batch_id=%s currencies=%s rates=%s',
-        resolved_batch_id, currencies.height, rates.height
+        resolved_batch_id,
+        currencies.height,
+        rates.height
     )
     return result
 
@@ -451,34 +493,81 @@ def _load_database(
             f'{dataset} _ingestion_batch_id must match the requested batch'
         )
 
+    LOGGER.info(
+        'Starting silver PostgreSQL load: batch_id=%s schema=%s',
+        batch_id,
+        SILVER_SCHEMA
+    )
     with database_factory() as database:
-        execute_sql_directory(database, sql_directory)
+        LOGGER.info(
+            'Executing silver DDL files: batch_id=%s directory=%s',
+            batch_id,
+            sql_directory
+        )
+        executed_files = execute_sql_directory(database, sql_directory)
+        for sql_file in executed_files:
+            LOGGER.info(
+                'Silver DDL executed: batch_id=%s file=%s transaction=pending',
+                batch_id,
+                sql_file
+            )
+        LOGGER.info(
+            'Replacing existing silver batch: batch_id=%s tables=%s.currencies,%s.rates',
+            batch_id,
+            SILVER_SCHEMA,
+            SILVER_SCHEMA
+        )
         database.delete(
-            'currencies',
+            table_name='currencies',
             schema=SILVER_SCHEMA,
             where={
                 '_ingestion_batch_id': batch_id
             }
         )
         database.delete(
-            'rates',
+            table_name='rates',
             schema=SILVER_SCHEMA,
             where={
                 '_ingestion_batch_id': batch_id
             }
         )
-        database.copy_dataframe(
-            currencies.select(CURRENCY_COLUMNS),
-            'currencies',
+        LOGGER.info(
+            'Starting COPY: dataset=currencies batch_id=%s table=%s.currencies rows=%s',
+            batch_id,
+            SILVER_SCHEMA,
+            currencies.height
+        )
+        currencies_rows = database.copy_dataframe(
+            dataframe=currencies.select(CURRENCY_COLUMNS),
+            table_name='currencies',
             schema=SILVER_SCHEMA,
             columns=CURRENCY_COLUMNS
         )
-        database.copy_dataframe(
-            rates.select(RATE_COLUMNS),
-            'rates',
+        LOGGER.info(
+            'Starting COPY: dataset=rates batch_id=%s table=%s.rates rows=%s',
+            batch_id,
+            SILVER_SCHEMA,
+            rates.height
+        )
+        rates_rows = database.copy_dataframe(
+            dataframe=rates.select(RATE_COLUMNS),
+            table_name='rates',
             schema=SILVER_SCHEMA,
             columns=RATE_COLUMNS
         )
+
+    LOGGER.info(
+        'PostgreSQL load committed: dataset=currencies batch_id=%s table=%s.currencies rows=%s',
+        batch_id,
+        SILVER_SCHEMA,
+        currencies_rows
+    )
+    LOGGER.info(
+        'PostgreSQL load committed: dataset=rates batch_id=%s table=%s.rates rows=%s',
+        batch_id,
+        SILVER_SCHEMA,
+        rates_rows
+    )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -492,21 +581,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--batch-id',
         help='Bronze batch; defaults to newest common batch'
-    )
-    parser.add_argument(
-        '--bronze-dir',
-        type=Path,
-        default=BRONZE_DIR
-    )
-    parser.add_argument(
-        '--silver-dir',
-        type=Path,
-        default=SILVER_DIR
-    )
-    parser.add_argument(
-        '--sql-dir',
-        type=Path,
-        default=SILVER_SQL_DIR
     )
     parser.add_argument(
         '--skip-database',
@@ -523,8 +597,5 @@ if __name__ == '__main__':
     arguments = _parse_args()
     run_silver(
         batch_id=arguments.batch_id,
-        bronze_dir=arguments.bronze_dir,
-        silver_dir=arguments.silver_dir,
-        sql_dir=arguments.sql_dir,
         persist_database=not arguments.skip_database
     )
