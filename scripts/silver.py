@@ -352,9 +352,10 @@ def _resolve_batch_id(bronze_root: Path, batch_id: str | None) -> str:
         directory = bronze_root / dataset
         batches_by_dataset.append(
             {
-                child.name for child in directory.iterdir()
+                child.name.removeprefix('batch_id=') for child in directory.iterdir()
                 if child.is_dir()
-                and BATCH_PATTERN.fullmatch(child.name)
+                and child.name.startswith('batch_id=')
+                and BATCH_PATTERN.fullmatch(child.name.removeprefix('batch_id='))
                 and (child / f'{dataset}.parquet').is_file()
             }
             if directory.is_dir() else set()
@@ -397,7 +398,7 @@ def run_silver(
     silver_root = Path(silver_dir).resolve()
     resolved_batch_id = _resolve_batch_id(bronze_root, batch_id)
     source_paths = {
-        dataset: bronze_root / dataset / resolved_batch_id / f'{dataset}.parquet'
+        dataset: bronze_root / dataset / f'batch_id={resolved_batch_id}' / f'{dataset}.parquet'
         for dataset in DATASETS
     }
     for source_path in source_paths.values():
@@ -408,18 +409,16 @@ def run_silver(
 
     currencies = pl.read_parquet(source_paths['currencies'])
     LOGGER.info(
-        'Bronze Parquet read: dataset=currencies batch_id=%s path=%s rows=%s',
+        'Bronze Parquet read: dataset=currencies batch_id=%s path=%s',
         resolved_batch_id,
-        source_paths['currencies'],
-        currencies.height
+        source_paths['currencies']
     )
 
     rates = pl.read_parquet(source_paths['rates'])
     LOGGER.info(
-        'Bronze Parquet read: dataset=rates batch_id=%s path=%s rows=%s',
+        'Bronze Parquet read: dataset=rates batch_id=%s path=%s',
         resolved_batch_id,
-        source_paths['rates'],
-        rates.height
+        source_paths['rates']
     )
 
     currencies = transform_currencies(currencies)
@@ -428,15 +427,14 @@ def run_silver(
     frames = {'currencies': currencies, 'rates': rates}
     result: dict[str, str | int] = {'batch_id': resolved_batch_id}
     for dataset, dataframe in frames.items():
-        destination = silver_root / dataset / resolved_batch_id / f'{dataset}.parquet'
+        destination = silver_root / dataset / f'batch_id={resolved_batch_id}' / f'{dataset}.parquet'
         result[f'{dataset}_path'] = str(persist_parquet(dataframe, destination))
         result[f'{dataset}_rows'] = dataframe.height
         LOGGER.info(
-            'Silver Parquet persisted: dataset=%s batch_id=%s path=%s rows=%s',
+            'Silver Parquet persisted: dataset=%s batch_id=%s path=%s',
             dataset,
             resolved_batch_id,
-            destination,
-            dataframe.height
+            destination
         )
 
     if persist_database:

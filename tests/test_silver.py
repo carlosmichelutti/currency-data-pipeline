@@ -189,7 +189,7 @@ class SilverTests(unittest.TestCase):
             root = Path(directory)
             for batch in ('20260930100000', '20261001100000'):
                 self._write_batch(root / 'bronze', batch)
-            incomplete = root / 'bronze' / 'rates' / '20261002100000'
+            incomplete = root / 'bronze' / 'rates' / 'batch_id=20261002100000'
             incomplete.mkdir(parents=True)
             persist_parquet(self.currencies(), root / 'bronze' / 'currencies' / incomplete.name / 'currencies.parquet')
             result = run_silver(bronze_dir=root / 'bronze', silver_dir=root / 'silver', persist_database=False)
@@ -214,7 +214,7 @@ class SilverTests(unittest.TestCase):
             before = {dataset: Path(result[f'{dataset}_path']).read_bytes() for dataset in ('currencies', 'rates')}
             persist_parquet(
                 self.rates().with_columns(pl.lit('-1').alias('rate')),
-                root / 'bronze' / 'rates' / 'batch-1' / 'rates.parquet',
+                root / 'bronze' / 'rates' / 'batch_id=batch-1' / 'rates.parquet',
             )
             with self.assertRaisesRegex(ValueError, 'rate'):
                 run_silver('batch-1', root / 'bronze', root / 'silver')
@@ -242,7 +242,7 @@ class SilverTests(unittest.TestCase):
     def _write_batch(self, root: Path, batch: str) -> None:
         for dataset, frame in (('currencies', self.currencies()), ('rates', self.rates())):
             frame = frame.with_columns(pl.lit(batch).alias('_ingestion_batch_id'))
-            persist_parquet(frame, root / dataset / batch / f'{dataset}.parquet')
+            persist_parquet(frame, root / dataset / f'batch_id={batch}' / f'{dataset}.parquet')
 
     def test_database_load_executes_ddl_and_replaces_only_requested_batch(self) -> None:
         database = MagicMock()
