@@ -6,13 +6,6 @@ CREATE TABLE IF NOT EXISTS gold.dim_currency (
     symbol TEXT,
     start_date DATE,
     end_date DATE,
-    _source_path TEXT NOT NULL,
-    _source_file TEXT NOT NULL,
-    _source_extension TEXT NOT NULL,
-    _source_row_number BIGINT NOT NULL,
-    _ingestion_batch_id TEXT NOT NULL,
-    _ingested_at_utc TIMESTAMPTZ NOT NULL,
-    _record_hash TEXT NOT NULL,
     CHECK (start_date <= end_date),
     CHECK (
         currency_key = (ascii(substr(iso_code, 1, 1)) - 65) * 676

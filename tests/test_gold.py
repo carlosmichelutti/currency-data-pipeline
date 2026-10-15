@@ -28,7 +28,9 @@ from scripts.gold import (
     unique_records,
 )
 from scripts.silver import (
+    CURRENCY_FIELDS,
     METADATA_COLUMNS,
+    RATE_FIELDS,
     run_silver,
     transform_currencies,
     transform_rates,
@@ -39,7 +41,7 @@ def with_metadata(frame: pl.DataFrame, dataset: str, batch: str = 'batch-1') -> 
     """Attach realistic bronze/silver lineage to a business fixture."""
     return frame.with_columns(
         pl.Series('_source_row_number', range(1, frame.height + 1), dtype=pl.Int64),
-        pl.lit(f'raw/{dataset}/{batch}/data.json').alias('_source_path'),
+        pl.lit(f'raw/{dataset}/batch_id={batch}/data.json').alias('_source_path'),
         pl.lit('data.json').alias('_source_file'),
         pl.lit('.json').alias('_source_extension'),
         pl.lit(batch).alias('_ingestion_batch_id'),
@@ -94,7 +96,7 @@ class GoldTests(unittest.TestCase):
             ('currencies', currency_source(batch)),
             ('rates', rate_source(batch) if rates is None else rates),
         ):
-            destination = root / dataset / batch / f'{dataset}.parquet'
+            destination = root / dataset / f'batch_id={batch}' / f'{dataset}.parquet'
             destination.parent.mkdir(parents=True, exist_ok=True)
             frame.write_parquet(destination)
 
@@ -133,7 +135,7 @@ class GoldTests(unittest.TestCase):
             with self.subTest(source=source), self.assertRaises(ValueError):
                 build_date_dimension(source)
 
-    def test_facts_have_one_row_per_day_pair_and_preserve_direction_and_lineage(self) -> None:
+    def test_facts_have_one_row_per_day_pair_and_preserve_business_values(self) -> None:
         frames = gold_frames()
         facts = frames['fact_exchange_rate']
         joined = (
@@ -144,24 +146,39 @@ class GoldTests(unittest.TestCase):
             .join(frames['dim_date'].select('date_key', 'date'), on='date_key')
         )
         assert_frame_equal(
-            joined.select('date', 'base', 'quote', 'rate', *METADATA_COLUMNS).sort('_source_row_number'),
-            rate_source().select('date', 'base', 'quote', 'rate', *METADATA_COLUMNS),
+            joined.select(RATE_FIELDS).sort('date', 'base', 'quote'),
+            rate_source().select(RATE_FIELDS).sort('date', 'base', 'quote'),
         )
         self.assertEqual(facts.columns, list(FACT_COLUMNS))
         self.assertEqual(facts.height, 3)
         self.assertEqual(facts['rate'].dtype, pl.Float64)
 
-    def test_equal_duplicates_keep_first_source_lineage_for_dimensions_and_facts(self) -> None:
+    def test_equal_business_duplicates_ignore_differences_in_source_metadata(self) -> None:
         currencies = currency_source()
         extra_currency = currencies.head(1).with_columns(pl.lit(99, dtype=pl.Int64).alias('_source_row_number'))
         dim = build_currency_dimension(pl.concat([extra_currency, currencies]))
         self.assertEqual(dim.height, 3)
-        self.assertEqual(dim.filter(pl.col('iso_code') == 'BRL')['_source_row_number'].item(), 1)
+        self.assertTrue(set(METADATA_COLUMNS).isdisjoint(dim.columns))
         rates = rate_source()
         duplicated = pl.concat([rates.head(1).with_columns(pl.lit(99, dtype=pl.Int64).alias('_source_row_number')), rates])
         facts = build_exchange_rate_fact(duplicated, dim, build_date_dimension(rates))
         self.assertEqual(facts.height, 3)
-        self.assertEqual(facts.filter(pl.col('date_key') == 20261001)['_source_row_number'].item(), 1)
+        self.assertTrue(set(METADATA_COLUMNS).isdisjoint(facts.columns))
+
+    def test_builders_accept_business_columns_without_source_metadata(self) -> None:
+        currencies = build_currency_dimension(currency_source().select(CURRENCY_FIELDS))
+        rates = rate_source().select(RATE_FIELDS)
+        dates = build_date_dimension(rates)
+        facts = build_exchange_rate_fact(rates, currencies, dates)
+        for table, frame in (
+            ('dim_currency', currencies),
+            ('dim_date', dates),
+            ('fact_exchange_rate', facts),
+        ):
+            self.assertEqual(frame.columns, list(TABLE_COLUMNS[table]))
+            self.assertFalse(any(column.startswith('_') for column in frame.columns))
+        self.assertEqual(currencies.width, 7)
+        self.assertEqual(facts.width, 4)
 
     def test_conflicting_business_values_are_rejected(self) -> None:
         source = currency_source()
@@ -228,9 +245,10 @@ class GoldTests(unittest.TestCase):
             self.assertEqual(first['dim_date_rows'], 3)
             self.assertEqual(first['fact_exchange_rate_rows'], 3)
             for table in TABLE_COLUMNS:
-                path = root / 'gold' / table / 'batch-1' / f'{table}.parquet'
+                path = root / 'gold' / table / 'batch_id=batch-1' / f'{table}.parquet'
                 self.assertEqual(first[f'{table}_path'], str(path.resolve()))
                 self.assertTrue(path.is_file())
+                self.assertFalse(any(column.startswith('_') for column in pl.read_parquet(path).columns))
             self.assertEqual(Path(silver['rates_path']).read_bytes(), original)
         factory.assert_not_called()
 
@@ -239,7 +257,7 @@ class GoldTests(unittest.TestCase):
             root = Path(directory)
             for batch in ('20261001000000', '20261002000000'):
                 self.write_silver(root / 'silver', batch)
-            incomplete = root / 'silver' / 'currencies' / '20261003000000'
+            incomplete = root / 'silver' / 'currencies' / 'batch_id=20261003000000'
             incomplete.mkdir()
             currency_source('20261003000000').write_parquet(incomplete / 'currencies.parquet')
             latest = run_gold(silver_dir=root / 'silver', gold_dir=root / 'gold', persist_database=False)
@@ -278,7 +296,7 @@ class GoldTests(unittest.TestCase):
                     self.assertEqual(Path(first[f'{table}_path']).read_bytes(), before[table])
         factory.assert_not_called()
 
-    def test_database_load_uses_dimensions_before_facts_and_only_deletes_requested_batch(self) -> None:
+    def test_database_load_upserts_dimensions_before_facts_without_metadata_or_deletion(self) -> None:
         database = MagicMock()
         database.__enter__.return_value = database
         submitted = []
@@ -293,8 +311,9 @@ class GoldTests(unittest.TestCase):
         self.assertEqual([entry[0] for entry in submitted], list(TABLE_COLUMNS))
         for table, records, kwargs in submitted:
             self.assertEqual(list(records[0]), list(TABLE_COLUMNS[table]))
+            self.assertFalse(any(column.startswith('_') for column in records[0]))
             self.assertEqual(kwargs, {'conflict_columns': TABLE_KEYS[table], 'schema': 'gold'})
-        database.delete.assert_called_once_with('fact_exchange_rate', schema='gold', where={'_ingestion_batch_id': 'batch-1'})
+        database.delete.assert_not_called()
         statements = [call.args[0] for call in database.execute.call_args_list]
         self.assertTrue(any('CREATE TABLE IF NOT EXISTS gold.fact_exchange_rate' in statement for statement in statements))
         database.__exit__.assert_called_once_with(None, None, None)
@@ -317,10 +336,129 @@ class GoldTests(unittest.TestCase):
             with patch('database.session.psycopg.connect', return_value=connection), self.assertRaisesRegex(RuntimeError, 'fact upsert failed'):
                 run_gold('batch-1', root / 'silver', root / 'gold', database_factory=PostgresDatabase)
             for table in TABLE_COLUMNS:
-                self.assertTrue((root / 'gold' / table / 'batch-1' / f'{table}.parquet').is_file())
+                self.assertTrue((root / 'gold' / table / 'batch_id=batch-1' / f'{table}.parquet').is_file())
         connection.rollback.assert_called_once_with()
         connection.commit.assert_not_called()
         connection.close.assert_called_once_with()
+
+    def test_gold_reads_persisted_values_without_rerunning_silver(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_silver(root / 'silver')
+            source_path = root / 'silver' / 'currencies' / 'batch_id=batch-1' / 'currencies.parquet'
+            source = currency_source().with_columns(pl.lit('Preserved Name').alias('name'))
+            source.write_parquet(source_path)
+            original = source_path.read_bytes()
+            with (
+                patch('scripts.silver.run_silver', side_effect=AssertionError('Silver rerun')) as silver,
+                patch('scripts.silver.transform_currencies', side_effect=AssertionError('Currency conversion')) as currencies,
+                patch('scripts.silver.transform_rates', side_effect=AssertionError('Rate conversion')) as rates,
+                self.assertNoLogs('scripts.silver', level='INFO'),
+            ):
+                result = run_gold('batch-1', root / 'silver', root / 'gold', persist_database=False)
+            output = pl.read_parquet(result['dim_currency_path'])
+            assert_frame_equal(
+                output.select(CURRENCY_FIELDS).sort('iso_code'),
+                source.select(CURRENCY_FIELDS).sort('iso_code'),
+            )
+            self.assertEqual(source_path.read_bytes(), original)
+            silver.assert_not_called()
+            currencies.assert_not_called()
+            rates.assert_not_called()
+
+    def test_untyped_silver_inputs_are_rejected_without_conversion(self) -> None:
+        frames = gold_frames()
+        for column in ('rate', 'date'):
+            source = rate_source().with_columns(pl.col(column).cast(pl.String))
+            before = source.clone()
+            with self.subTest(column=column), self.assertRaisesRegex(ValueError, 'Silver schema mismatch'):
+                build_exchange_rate_fact(source, frames['dim_currency'], frames['dim_date'])
+            assert_frame_equal(source, before)
+        source = currency_source().with_columns(pl.col('iso_numeric').cast(pl.Int64))
+        with self.assertRaisesRegex(ValueError, 'Silver schema mismatch'):
+            build_currency_dimension(source)
+
+    def test_logs_read_build_relationship_and_file_progress(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_silver(root / 'silver')
+            with self.assertLogs('scripts.gold', level='INFO') as captured:
+                run_gold('batch-1', root / 'silver', root / 'gold', persist_database=False)
+        messages = [record.getMessage() for record in captured.records]
+        for dataset in ('currencies', 'rates'):
+            for event in ('Silver Parquet read', 'Gold lineage validated'):
+                message = next(message for message in messages if f'{event}: dataset={dataset}' in message)
+                self.assertIn('batch_id=batch-1', message)
+                self.assertIn('rows=3', message)
+            self.assertTrue(any(f'Silver schema validated: dataset={dataset}' in message for message in messages))
+        for table in TABLE_COLUMNS:
+            for event in ('Gold table build started', 'Gold table build completed', 'Writing gold Parquet', 'Gold Parquet persisted'):
+                self.assertTrue(any(f'{event}: table={table}' in message for message in messages), (event, table))
+        for role in ('date', 'base', 'quote'):
+            message = next(message for message in messages if f'Gold dimension lookup completed: source_column={role} ' in message)
+            self.assertIn('rows_resolved=3', message)
+        self.assertTrue(any('Gold records deduplicated:' in message for message in messages))
+        self.assertIn('Gold PostgreSQL load skipped: batch_id=batch-1', messages)
+        summary = next(message for message in messages if message.startswith('Gold transformation completed:'))
+        self.assertIn('currencies=3 dates=3 facts=3', summary)
+        self.assertIn('elapsed_seconds=', summary)
+
+    def test_logs_database_ddl_pending_changes_and_transaction_completion(self) -> None:
+        database = MagicMock()
+        database.__enter__.return_value = database
+        database.upsert.side_effect = [3, 3, 3]
+        frames = gold_frames()
+        with self.assertLogs('scripts.gold', level='INFO') as captured:
+            load_database(frames, 'batch-1', database_factory=lambda: database)
+        messages = [record.getMessage() for record in captured.records]
+        self.assertIn('Gold transaction lock acquired: batch_id=batch-1', messages)
+        ddl = [message for message in messages if message.startswith('Gold DDL executed:')]
+        self.assertEqual(len(ddl), 5)
+        self.assertTrue(all('batch_id=batch-1' in message and 'transaction=pending' in message for message in ddl))
+        for table in TABLE_COLUMNS:
+            self.assertTrue(any(f'Starting gold upsert: table=gold.{table} rows=3' in message for message in messages))
+            message = next(message for message in messages if f'Gold upsert submitted: table={table} ' in message)
+            self.assertIn('batch_id=batch-1 rows=3 transaction=pending', message)
+        self.assertFalse(any('Gold batch deletion' in message for message in messages))
+        database.delete.assert_not_called()
+        completion = next(index for index, message in enumerate(messages) if 'Gold PostgreSQL transaction completing:' in message)
+        success = next(index for index, message in enumerate(messages) if 'Gold PostgreSQL load completed:' in message)
+        self.assertLess(completion, success)
+
+    def test_transaction_failure_logs_stage_without_success(self) -> None:
+        connection = MagicMock()
+        connection.commit.side_effect = RuntimeError('commit failure')
+        frames = gold_frames()
+        with (
+            patch('database.session.psycopg.connect', return_value=connection),
+            self.assertLogs('scripts.gold', level='INFO') as captured,
+            self.assertRaisesRegex(RuntimeError, 'commit failure'),
+        ):
+            load_database(frames, 'batch-1', database_factory=PostgresDatabase)
+        messages = [record.getMessage() for record in captured.records]
+        failure = next(message for message in messages if message.startswith('Gold PostgreSQL load failed:'))
+        self.assertIn('batch_id=batch-1 stage=transaction_completion', failure)
+        self.assertFalse(any(message.startswith('Gold PostgreSQL load completed:') for message in messages))
+        connection.close.assert_called_once_with()
+
+    def test_missing_input_and_failed_write_log_the_failing_stage(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertLogs('scripts.gold', level='INFO') as captured, self.assertRaises(FileNotFoundError):
+                run_gold('batch-1', root / 'silver', root / 'gold', persist_database=False)
+            failure = next(record.getMessage() for record in captured.records if 'Gold transformation failed:' in record.getMessage())
+            self.assertIn('batch_id=batch-1 stage=source_validation', failure)
+            self.write_silver(root / 'silver')
+            with (
+                patch('scripts.gold.persist_parquet', side_effect=OSError('disk failure')),
+                self.assertLogs('scripts.gold', level='INFO') as captured,
+                self.assertRaisesRegex(OSError, 'disk failure'),
+            ):
+                run_gold('batch-1', root / 'silver', root / 'gold', persist_database=False)
+            messages = [record.getMessage() for record in captured.records]
+            failure = next(message for message in messages if message.startswith('Gold transformation failed:'))
+            self.assertIn('batch_id=batch-1 stage=dim_currency_parquet_write', failure)
+            self.assertFalse(any(message.startswith('Gold transformation completed:') for message in messages))
 
 
 if __name__ == '__main__':
