@@ -9,7 +9,6 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "apache-airflow==3.3.0; sys_platform != 'win32'",
-    "pandas>=2.3,<3",
     "pendulum>=3.2.0",
     "polars>=1.0,<2",
     "psycopg[binary]>=3.2,<4",
@@ -32,6 +31,8 @@ build-backend = "uv_build"
 package = false
 # Keep the providers bundled in apache/airflow:3.3.0 compatible with the lock.
 constraint-dependencies = [
+    # FAB's SQLAlchemy-Utils still uses internals removed in SQLAlchemy 2.1.
+    "sqlalchemy<2.1",
     "cryptography<49",
     "protobuf<7",
     "rich<14",
