@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="600" viewBox="0 0 1440 600" role="img" aria-labelledby="title desc">
+  <title id="title">Currency Data Pipeline architecture</title>
+  <desc id="desc">Apache Airflow orchestrates Frankfurter API extraction into raw JSON, bronze ingestion, silver validation, and a gold star schema. Batch files are stored locally; bronze, silver, and gold tables are loaded into PostgreSQL.</desc>
+  <defs>
+    <linearGradient id="background" x2="1" y2="1">
+      <stop stop-color="#0d182b"/>
+      <stop offset="1" stop-color="#111d30"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+      <path d="M0 0 6 3.5 0 7" fill="none" stroke="#8095b0" stroke-width="1.5"/>
+    </marker>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; }
+      .heading { fill: #f2f6fc; font-size: 32px; font-weight: 700; }
+      .subtitle { fill: #a6b7cc; font-size: 18px; }
+      .eyebrow { font-size: 14px; font-weight: 700; letter-spacing: 1.5px; }
+      .label { fill: #f2f6fc; font-size: 20px; font-weight: 700; }
+      .detail { fill: #b6c5d8; font-size: 15px; }
+      .icon { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+      .connector { fill: none; stroke: #8095b0; stroke-width: 2; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1440" height="600" rx="24" fill="url(#background)"/>
+  <text class="heading" x="64" y="65">Currency Data Pipeline</text>
+  <text class="subtitle" x="64" y="96">From exchange rate data to an analytical star schema</text>
+
+  <rect x="64" y="126" width="1312" height="54" rx="12" fill="#132d39" stroke="#2b5961"/>
+  <g class="icon" stroke="#6ee7d2" transform="translate(88 143)">
+    <circle cx="10" cy="10" r="10"/>
+    <path d="M10 4v6l4 3"/>
+  </g>
+  <text x="126" y="159" class="eyebrow" fill="#8aefdc">APACHE AIRFLOW</text>
+  <text x="350" y="159" fill="#c0d7df" font-size="16">Daily orchestration</text>
+  <circle cx="523" cy="153" r="2" fill="#5b8690"/>
+  <text x="546" y="159" fill="#c0d7df" font-size="16">Shared batch ID</text>
+  <circle cx="696" cy="153" r="2" fill="#5b8690"/>
+  <text x="719" y="159" fill="#c0d7df" font-size="16">Task retries</text>
+
+  <path class="connector" d="M293 315h32"/>
+  <path class="connector" d="M565 315h32"/>
+  <path class="connector" d="M837 315h32"/>
+  <path class="connector" d="M1109 315h32"/>
+
+  <rect x="64" y="216" width="224" height="208" rx="16" fill="#17263c" stroke="#344b6a"/>
+  <text class="eyebrow" x="88" y="247" fill="#8bbcff">01 / SOURCE</text>
+  <g class="icon" stroke="#8bbcff" transform="translate(88 268)">
+    <circle cx="20" cy="20" r="18"/>
+    <ellipse cx="20" cy="20" rx="8" ry="18"/>
+    <path d="M2 20h36M6 10h28M6 30h28"/>
+  </g>
+  <text class="label" x="88" y="341">Frankfurter API</text>
+  <text class="detail" x="88" y="370">Currency catalog</text>
+  <text class="detail" x="88" y="393">Latest exchange rates</text>
+
+  <rect x="336" y="216" width="224" height="208" rx="16" fill="#18273b" stroke="#405371"/>
+  <text class="eyebrow" x="360" y="247" fill="#b2c6e5">02 / RAW</text>
+  <g class="icon" stroke="#b2c6e5" transform="translate(360 268)">
+    <path d="M7 2h20l10 10v26H7zM27 2v10h10M16 19l-5 5 5 5M28 19l5 5-5 5M23 17l-3 14"/>
+  </g>
+  <text class="label" x="360" y="341">Original responses</text>
+  <text class="detail" x="360" y="370">Unmodified API data</text>
+  <text class="detail" x="360" y="393">JSON files per batch</text>
+
+  <rect x="608" y="216" width="224" height="208" rx="16" fill="#2c2425" stroke="#75513d"/>
+  <text class="eyebrow" x="632" y="247" fill="#e8ac7a">03 / BRONZE</text>
+  <g class="icon" stroke="#e8ac7a" transform="translate(632 268)">
+    <path d="M20 2 39 12 20 22 1 12zM1 21l19 10 19-10M1 30l19 10 19-10"/>
+  </g>
+  <text class="label" x="632" y="341">Traceable ingestion</text>
+  <text class="detail" x="632" y="370">Source fields as text</text>
+  <text class="detail" x="632" y="393">Lineage + record hashes</text>
+
+  <rect x="880" y="216" width="224" height="208" rx="16" fill="#242d3c" stroke="#64728a"/>
+  <text class="eyebrow" x="904" y="247" fill="#d1dceb">04 / SILVER</text>
+  <g class="icon" stroke="#d1dceb" transform="translate(904 268)">
+    <path d="M3 3h34L24 19v16l-8 4V19z"/>
+    <path d="m28 29 5 5 9-11" stroke="#8aefdc"/>
+  </g>
+  <text class="label" x="904" y="341">Validated records</text>
+  <text class="detail" x="904" y="370">Clean text + typed values</text>
+  <text class="detail" x="904" y="393">Currency and rate checks</text>
+
+  <rect x="1152" y="216" width="224" height="208" rx="16" fill="#302b20" stroke="#87703a"/>
+  <text class="eyebrow" x="1176" y="247" fill="#f4d57c">05 / GOLD</text>
+  <g class="icon" stroke="#f4d57c" transform="translate(1176 268)">
+    <rect x="14" y="14" width="14" height="14" rx="3"/>
+    <rect x="16" width="10" height="7" rx="2"/>
+    <rect x="0" y="31" width="10" height="7" rx="2"/>
+    <rect x="32" y="31" width="10" height="7" rx="2"/>
+    <path d="M21 7v7M14 25l-7 6M28 25l7 6"/>
+  </g>
+  <text class="label" x="1176" y="341">Analytics model</text>
+  <text class="detail" x="1176" y="370">Currency + date dimensions</text>
+  <text class="detail" x="1176" y="393">Daily exchange rate facts</text>
+
+  <rect x="64" y="460" width="632" height="90" rx="12" fill="#142337" stroke="#2d405a"/>
+  <g class="icon" stroke="#8095b0" transform="translate(88 484)">
+    <path d="M0 7h15l5 6h22v27H0zM0 13h42"/>
+  </g>
+  <text class="eyebrow" x="152" y="493" fill="#b6c5d8">BATCH FILES / data/</text>
+  <text class="detail" x="152" y="521">Raw JSON + bronze, silver, and gold Parquet</text>
+
+  <rect x="720" y="460" width="656" height="90" rx="12" fill="#142337" stroke="#2d405a"/>
+  <g class="icon" stroke="#8095b0" transform="translate(744 480)">
+    <ellipse cx="20" cy="8" rx="19" ry="7"/>
+    <path d="M1 8v28c0 9 38 9 38 0V8M1 22c0 9 38 9 38 0"/>
+  </g>
+  <text class="eyebrow" x="808" y="493" fill="#b6c5d8">POSTGRESQL</text>
+  <text class="detail" x="808" y="521">Bronze + silver tables and a gold star schema</text>
+</svg>

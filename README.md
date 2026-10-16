@@ -1,336 +1,217 @@
 # Currency Data Pipeline
 
-Pipeline de dados de câmbio orquestrado pelo Apache Airflow.
+![Pipeline architecture: Airflow orchestrates Frankfurter API extraction through raw, bronze, silver, and gold layers, with JSON, Parquet, and PostgreSQL outputs.](docs/assets/pipeline.svg)
 
-## Extração da Frankfurter
+A currency exchange rate pipeline built with Python, Polars, PostgreSQL, and Apache Airflow. It extracts data from the Frankfurter v2 API and processes it through raw, bronze, silver, and gold layers for analytical queries.
 
-A integração com a API v2 da Frankfurter fica isolada em
-`scripts/extract/extract.py`. A DAG deve apenas importar e orquestrar essa
-função:
+## Pipeline
 
-```python
-from scripts.extract import extract_currencies, extract_rates
-
-
-def extract_currency_rates(**context):
-    return extract_rates(
-        base="BRL",
-        quotes=["USD", "EUR"],
-        date=context["ds"],
-    )
+```text
+Frankfurter API -> Raw JSON -> Bronze -> Silver -> Gold
 ```
 
-Também é possível extrair um intervalo histórico:
+| Layer | Purpose | Outputs |
+| --- | --- | --- |
+| Raw | Fetch the currency catalog and latest rates. Defaults to BRL as the base and all available quote currencies. | JSON files for `currencies` and `rates`. |
+| Bronze | Preserve source fields as nullable text and add file lineage, batch ID, ingestion timestamp, and record hash. | Parquet files and `bronze.currencies` / `bronze.rates`. |
+| Silver | Clean text, normalize currency codes, parse dates, and convert rates to `Float64`. Reject invalid records by failing the batch. | Parquet files and `silver.currencies` / `silver.rates`. |
+| Gold | Build a star schema with stable keys and one exchange rate per date, base currency, and quote currency. | Parquet files and `gold.dim_currency`, `gold.dim_date`, and `gold.fact_exchange_rate`. |
 
-```python
-rates = extract_rates(
-    base="BRL",
-    quotes=["USD", "EUR"],
-    start_date="2026-01-01",
-    end_date="2026-01-31",
-)
+Silver preserves bronze metadata and rows without deduplication. Gold validates the persisted silver files, resolves dimensions, deduplicates records, and retains only business attributes and keys.
+
+## Setup
+
+### 1. Install prerequisites
+
+Install Git, Docker with Compose v2, and [uv](https://docs.astral.sh/uv/getting-started/installation/). Start Docker before running Compose commands. On Windows, use Docker Desktop with Linux containers.
+
+Install uv on Windows:
+
+```powershell
+winget install --id=astral-sh.uv -e
 ```
 
-O catálogo de moedas pode ser extraído separadamente para alimentar uma tabela
-de dimensão com código ISO, nome, símbolo e período de disponibilidade:
+Or on Linux/macOS:
 
-```python
-currencies = extract_currencies(include_legacy=False)
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Não é necessário consultar o catálogo antes de cada extração de taxas. Quando
-`quotes` é omitido, a própria rota de taxas retorna todas as moedas disponíveis
-para a moeda-base e os filtros informados.
+Open a new terminal after installation. The Compose stack checks for at least 4 GB of memory and recommends 2 CPUs and 10 GB of disk space.
 
-A função devolve a resposta normalizada da API v2 como uma lista de registros,
-um por par de moedas. Erros HTTP, de conexão e respostas inválidas geram
-`FrankfurterError`, permitindo que o mecanismo de retries do Airflow cuide das
-novas tentativas.
+### 2. Clone the repository
 
-As chamadas HTTP utilizam a biblioteca `requests` com uma sessão reutilizável e
-timeout configurável.
+```bash
+git clone https://github.com/carlosmichelutti/currency-data-pipeline.git
+cd currency-data-pipeline
+```
 
-## Persistência local da camada raw
+Run all remaining commands from this directory.
 
-A função `run_extract` coordena as duas chamadas e persiste os resultados. Ela
-recebe opcionalmente o lote; fora do Airflow, gera um lote com o timestamp UTC:
+### 3. Install Python and dependencies
+
+```bash
+uv python install 3.13
+uv sync --locked
+```
+
+The repository pins Python 3.13. uv creates `.venv` and installs the locked dependencies, including development tools. See [uv's syncing documentation](https://docs.astral.sh/uv/concepts/projects/sync/) for lockfile behavior.
+
+Airflow 3.3.0 is installed locally on Linux/macOS. On native Windows, it is excluded; run Airflow through Docker. The layer scripts work locally on Windows.
+
+### 4. Configure the environment
+
+Copy the example configuration on Linux/macOS:
+
+```bash
+cp .env.example .env
+```
+
+On Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Review these settings in `.env`:
+
+| Variable | Default / configuration |
+| --- | --- |
+| `DATABASE_HOST` | `localhost` for scripts running on the host. |
+| `DATABASE_PORT` | `5432`; choose another available host port if needed. |
+| `DATABASE_NAME` | `currency_pipeline` |
+| `DATABASE_USER` | `currency_pipeline` |
+| `DATABASE_PASSWORD` | `currency_pipeline` for local development. |
+| `AIRFLOW_UID` | `50000` on Windows/macOS; on Linux, use the output of `id -u`. |
+| `FERNET_KEY` | For Airflow, generate a key below and paste it here. |
+
+```bash
+uv run python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
+```
+
+The `.env` file and generated pipeline data are ignored by Git. This Compose configuration is intended for local development.
+
+## Run locally, layer by layer
+
+After setup, start the pipeline database and wait for it to become healthy:
+
+```bash
+docker compose up -d --wait postgres-currency-pipeline
+```
+
+Run the layers in this order:
+
+```bash
+uv run python -m scripts.extract
+uv run python -m scripts.bronze
+uv run python -m scripts.silver
+uv run python -m scripts.gold
+```
+
+Extraction creates a batch ID in `YYYYMMDDHHMMSS` format using UTC-03:00. Each downstream script selects the latest complete batch in its input layer. SQL files under `sql/<layer>/` create or update schemas and tables automatically before loading; no manual DDL execution is needed.
+
+To reprocess a specific existing batch, pass its ID without the `batch_id=` prefix:
+
+```bash
+uv run python -m scripts.bronze --batch-id 20261015120000
+uv run python -m scripts.silver --batch-id 20261015120000
+uv run python -m scripts.gold --batch-id 20261015120000
+```
+
+For a file-only run, complete setup, skip starting PostgreSQL, and execute:
+
+```bash
+uv run python -m scripts.extract
+uv run python -m scripts.bronze --skip-database
+uv run python -m scripts.silver --skip-database
+uv run python -m scripts.gold --skip-database
+```
+
+To customize extraction from Python:
 
 ```python
 from scripts.extract import run_extract
 
-
-result = run_extract(batch_id="20260928190000")
+result = run_extract(base="BRL", quotes=["USD", "EUR"])
+print(result)
 ```
 
-O retorno é apenas o caminho absoluto do arquivo, pequeno o suficiente para ser
-compartilhado via XCom. Os dados são gravados com esta organização:
+`extract_rates()` also accepts `date` or `start_date` / `end_date` for historical queries. The default pipeline always fetches the latest available rates.
+
+## Run with Airflow (alternative)
+
+After setup, build the image and initialize Airflow. Wait for initialization to finish successfully before starting the stack:
+
+```bash
+docker compose up --build airflow-init
+docker compose up -d
+docker compose ps
+```
+
+Compose starts the Airflow API server, scheduler, DAG processor, Celery worker, triggerer, Redis, and two PostgreSQL services: one for Airflow metadata and one for pipeline data. Containers connect to the pipeline database at `postgres-currency-pipeline:5432`; the host uses the settings in `.env`.
+
+1. Wait for the services to become healthy, then open [Airflow](http://localhost:8080).
+2. Sign in with `airflow` / `airflow` unless you set `_AIRFLOW_WWW_USER_USERNAME` and `_AIRFLOW_WWW_USER_PASSWORD` in `.env`.
+3. Find `currency_exchange_rates_dag` and trigger a manual run.
+4. Check task status and logs in the DAG view. Unpause the DAG to enable scheduled runs.
 
 ```text
-data/raw/
-├── currencies/batch_id=<batch_id>/data.json
-└── rates/batch_id=<batch_id>/data.json
+generate_batch_id -> run_extract -> run_bronze -> run_silver -> run_gold
 ```
 
-A gravação continua usando um arquivo temporário e uma substituição atômica.
-Assim, uma falha durante a escrita não deixa um JSON parcialmente gravado.
-Reexecuções no mesmo caminho substituem deterministicamente o arquivo anterior.
+The DAG runs daily at midnight in `America/Sao_Paulo`, starting October 15, 2026, with catchup disabled and one active run at a time. Tasks retry up to three times at five-minute intervals. All tasks share a batch ID derived from the logical date, or the fixed run timestamp for manual runs. This identifies ingestion; it does not filter source rates by that date.
 
-No Docker, `data/` é compartilhado em `/opt/airflow/data` por todos os serviços
-e persistido no host. Seu conteúdo é ignorado pelo Git.
+Rebuild after changing dependencies with `docker compose up -d --build`. Stop services with `docker compose down`; database volumes and files in `data/` are preserved.
 
-## DAG do pipeline
+## Results and return values
 
-A DAG `currency_exchange_rates_dag` executa diariamente com esta sequência:
+Files are partitioned by ingestion batch:
 
 ```text
-generate_batch_id → run_extract → run_bronze → run_silver → run_gold
+data/raw/<dataset>/batch_id=<id>/data.json
+data/bronze/<dataset>/batch_id=<id>/<dataset>.parquet
+data/silver/<dataset>/batch_id=<id>/<dataset>.parquet
+data/gold/<table>/batch_id=<id>/<table>.parquet
 ```
 
-`generate_batch_id` cria o lote a partir da data lógica do DagRun convertida
-para `America/Sao_Paulo` (UTC−3 atualmente). `run_extract` recebe esse valor
-pela TaskFlow API, que armazena e resolve o XCom
-automaticamente, e retorna somente o lote e os caminhos dos arquivos.
-`run_bronze` recebe o lote retornado por `run_extract`, e `run_silver` recebe
-o lote retornado por `run_bronze`. `run_gold` recebe o lote da silver e constrói
-as dimensões e a fato. Essas referências também criam as
-dependências entre as tasks: uma camada só inicia após o sucesso da anterior.
-Bronze, silver e gold persistem os Parquets e carregam suas tabelas PostgreSQL.
+`<dataset>` is `currencies` or `rates`; `<table>` is `dim_currency`, `dim_date`, or `fact_exchange_rate`. Docker shares these files with the host through `/opt/airflow/data`.
 
-O Airflow `3.3.0`, a mesma versão padrão do Docker Compose, é gerenciado no
-`pyproject.toml` e no `uv.lock`. Em Linux/macOS, `uv sync` instala também o
-Airflow. No Windows nativo, a dependência é omitida por condição de plataforma;
-o pipeline continua executando o Airflow nos containers Linux do Compose.
+| Python function | Returned dictionary |
+| --- | --- |
+| `run_extract()` | `batch_id`, `currencies_path`, `rates_path` |
+| `run_bronze()` / `run_silver()` | The same keys, plus `currencies_rows` and `rates_rows`. |
+| `run_gold()` | `batch_id`, plus `<table>_path` and `<table>_rows` for each gold table. |
 
-A imagem definida no `Dockerfile` estende `apache/airflow:3.3.0` e instala as
-dependências exportadas do `uv.lock`, incluindo Polars. Todos os serviços do
-Airflow no Compose usam essa imagem. Após mudar as dependências, reconstrua
-e atualize os containers:
+Paths are absolute. Airflow shares these small dictionaries through XCom; CLI commands write progress and results to logs. Row counts depend on the API response and batch contents.
+
+Rerunning a batch replaces its files. Bronze and silver replace only that batch's database rows using transactional `COPY` loads. Gold upserts shared dimensions and daily facts across batches: currency attributes are updated in place (SCD type 1), overlapping rates use the latest successful load, and absent facts are preserved. Gold Parquets contain only the current batch; its PostgreSQL tables accumulate results across batches. Database loads are transactional per layer; files remain available if a database load fails.
+
+Query the final model in a PostgreSQL client connected with your `DATABASE_*` settings:
+
+```sql
+SELECT d.date, b.iso_code AS base, q.iso_code AS quote, f.rate
+FROM gold.fact_exchange_rate AS f
+JOIN gold.dim_date AS d ON d.date_key = f.date_key
+JOIN gold.dim_currency AS b ON b.currency_key = f.base_currency_key
+JOIN gold.dim_currency AS q ON q.currency_key = f.quote_currency_key
+ORDER BY d.date DESC, base, quote
+LIMIT 20;
+```
+
+Each row means **1 unit of the base currency = rate units of the quote currency**. Rates use approximate floating-point values without explicit rounding.
+
+## Tests
+
+After setup:
 
 ```bash
-docker compose up -d --build
+uv run python -m unittest discover -s tests -v
 ```
 
-Também é possível executar a extração fora do Airflow:
+On native Windows, DAG tests are skipped. To include them, build the Docker image as described above, then run the suite in Linux:
 
 ```bash
-python scripts/extract/extract.py
+docker compose run --rm --no-deps --volume ./tests:/opt/airflow/tests:ro -e PYTHONPATH=/opt/airflow airflow-cli python -m unittest discover -s /opt/airflow/tests -v
 ```
 
-A execução direta configura logs no terminal. No Airflow, as mesmas mensagens
-ficam disponíveis nos logs da task `run_extract`, incluindo início e fim da
-extração, endpoint consultado, status HTTP, quantidade de registros, arquivos
-persistidos e eventuais falhas.
-
-Por enquanto, moedas e cotações ficam na mesma DAG para compartilharem o mesmo
-lote. Elas podem ser separadas futuramente caso precisem de agendamentos ou
-políticas de retry diferentes.
-
-Os containers recebem `scripts` em `/opt/airflow/scripts` e usam
-`PYTHONPATH=/opt/airflow`, portanto o mesmo import funciona localmente e no
-Airflow.
-
-## Camada bronze
-
-`scripts/bronze.py` lê os JSONs de um mesmo lote e mantém todos os campos da API
-como texto nullable, sem converter datas ou taxas para tipos semânticos. Apenas
-os metadados operacionais mantêm tipos apropriados para monitoramento:
-
-- `_source_path`: caminho do JSON que originou a linha;
-- `_source_file`: nome do arquivo de origem;
-- `_source_extension`: extensão do arquivo de origem;
-- `_source_row_number`: posição da linha no JSON, iniciando em 1;
-- `_ingestion_batch_id`: identificador do lote de ingestão;
-- `_ingested_at_utc`: instante da ingestão com timezone;
-- `_record_hash`: hash SHA-256 determinístico dos campos de origem da linha.
-
-Os Parquets são escritos atomicamente nestes caminhos:
-
-```text
-data/bronze/
-├── currencies/<batch_id>/currencies.parquet
-└── rates/<batch_id>/rates.parquet
-```
-
-Sem `--batch-id`, o script escolhe o lote mais recente que exista tanto em
-`currencies` quanto em `rates`:
-
-```bash
-uv run python -m scripts.bronze
-uv run python -m scripts.bronze --batch-id 20260930104015
-```
-
-Para gerar somente os Parquets, sem conexão com o banco:
-
-```bash
-uv run python -m scripts.bronze --skip-database
-```
-
-## Camada silver
-
-`scripts/silver.py` lê os Parquets bronze de um mesmo lote, transforma os dados
-com Polars, carrega `silver.currencies` e `silver.rates` no PostgreSQL e grava
-arquivos Parquet nestes caminhos:
-
-```text
-data/silver/
-├── currencies/<batch_id>/currencies.parquet
-└── rates/<batch_id>/rates.parquet
-```
-
-Instale as dependências e execute:
-
-```bash
-uv sync
-uv run python -m scripts.silver
-uv run python -m scripts.silver --batch-id 20261001084723
-```
-
-Sem `--batch-id`, o script seleciona o maior identificador em ordem lexical
-que tenha os dois Parquets bronze completos (o mais recente para lotes no
-formato `YYYYMMDDHHMMSS`). `--bronze-dir` e `--silver-dir` permitem configurar
-as raízes dos arquivos. Também funciona com `python scripts/silver.py`.
-
-A carga usa o serviço `postgres-pipeline` do Compose e as mesmas configurações
-`DATABASE_*` da bronze, lidas do `.env`. Inicie o serviço antes da execução:
-
-```bash
-docker compose up -d postgres-pipeline
-```
-
-Por padrão, os dois destinos são persistidos. Para gravar apenas os Parquets:
-
-```bash
-uv run python -m scripts.silver --skip-database
-```
-
-Em Python, use `run_silver(persist_database=False)` para o mesmo comportamento.
-`--sql-dir` permite selecionar outra pasta de DDL.
-
-Antes de cada carga, `sql/silver` é executado em ordem lexical para criar o
-schema e as tabelas de forma idempotente. A carga usa `COPY FROM STDIN` e
-substitui somente o `_ingestion_batch_id` solicitado nas duas tabelas. DDL, remoção do
-lote e inserção dos dois datasets compartilham uma transação: uma falha no
-banco desfaz toda a carga. Os Parquets são escritos antes dessa transação e
-permanecem disponíveis se a carga falhar. A conversão para pandas com tipos
-Arrow ocorre somente na chamada ao writer compartilhado de PostgreSQL;
-as transformações continuam em Polars.
-
-As funções gerais podem ser reutilizadas em qualquer dataset:
-
-- `clean_text`: remove espaços nas extremidades, converte texto vazio em nulo
-  e permite configurar caixa, redução de espaços internos e o tipo de destino;
-- `cast_columns`: recebe um mapa de coluna para tipo Polars;
-- `parse_dates`: limpa textos e converte datas usando um formato configurável;
-- `require_columns`: valida a presença das colunas esperadas;
-- `persist_parquet`: grava um DataFrame Polars com substituição atômica.
-
-```python
-import polars as pl
-from scripts.silver import clean_text, run_silver
-
-frame = frame.with_columns(
-    clean_text("base", case="upper"),
-    clean_text("rate", cast=pl.Float64),
-)
-result = run_silver(batch_id="20261001084723")
-```
-
-`transform_currencies` aplica as regras do catálogo: código ISO em maiúsculas,
-nome com espaços internos normalizados, símbolo preservado e datas como
-`Date`. `iso_numeric` permanece como texto com três dígitos, preservando zeros
-à esquerda (`008`); valores vazios viram nulos. Códigos numéricos, símbolos e
-datas de cobertura aceitam nulos; nome e código ISO são obrigatórios. As datas
-descrevem a cobertura de publicação da API. Quando ambas estão preenchidas,
-`start_date` não pode ser posterior a `end_date`.
-
-`transform_rates` normaliza `base` e `quote` em maiúsculas, converte `date`
-para `Date` e `rate` para `Float64`, sem arredondamento explícito. Os quatro
-campos são obrigatórios e as taxas devem ser positivas e finitas. `Float64`
-usa representação aproximada de ponto flutuante.
-
-Códigos de moeda devem ter três letras. Conversões inválidas interrompem o lote
-com erro; as funções gerais permitem `strict=False` para converter valores
-inválidos em nulos quando essa política for necessária. Linhas, sua ordem e
-metadados bronze são preservados, sem deduplicação ou exclusão silenciosa.
-Ambos os datasets são validados antes de gravar qualquer saída. A escrita é
-atômica por arquivo; reexecutar o mesmo lote substitui seus Parquets. O retorno
-contém o lote, caminhos absolutos e contagens de linhas, permitindo usar
-`run_silver` em uma task do Airflow.
-
-Os logs da silver mostram leitura da bronze, início de cada dataset, limpeza
-de textos, conversão de tipos, validação, escrita de Parquet, execução dos DDL,
-remoção do lote anterior e carga via COPY. Cada dataset tem um resumo com lote,
-linhas recebidas, linhas processadas, linhas rejeitadas e duração. A conclusão
-da carga no PostgreSQL só é registrada após a saída do contexto transacional.
-
-Uma rejeição registra a regra que falhou, a quantidade de linhas afetadas e
-uma amostra de até cinco registros, incluindo `_source_row_number` e os valores
-envolvidos. Erros de conversão também identificam valores inválidos. O resumo
-da falha conta linhas distintas identificadas até a interrupção; outras regras
-podem não ter sido avaliadas. Quando não é possível determinar a quantidade
-(por exemplo, por falta de colunas), o log mostra `rows_rejected=unknown`.
-`rows_processed` conta apenas linhas de um dataset concluído com sucesso, por
-isso é zero no resumo de falha. A política de rejeição continua interrompendo
-o lote, sem excluir linhas e seguir com uma carga parcial.
-
-## Camada gold
-
-`scripts/gold.py` constrói um modelo estrela a partir dos Parquets silver:
-
-- `gold.dim_currency`: uma moeda por código ISO, compartilhada pelos papéis
-  de moeda base e moeda cotada;
-- `gold.dim_date`: um dia por linha, com atributos de calendário;
-- `gold.fact_exchange_rate`: uma cotação por data, moeda base e moeda cotada,
-  com três chaves estrangeiras e a taxa original, sem métricas agrupadas.
-
-As transformações usam Polars, funções documentadas e helpers parametrizados
-para deduplicação, resolução de chaves e persistência. As chaves permanecem
-estáveis entre lotes. A dimensão de moeda usa SCD tipo 1; fatos sobrepostos
-são atualizados pela última carga executada com sucesso. Reexecutar um lote
-não duplica cotações. Toda a carga SQL é transacional.
-
-```bash
-uv run python -m scripts.gold
-uv run python -m scripts.gold --batch-id 20261009090000
-uv run python -m scripts.gold --skip-database
-```
-
-Os DDLs ficam em `sql/gold`. Os Parquets seguem o formato
-`data/gold/<tabela>/<batch_id>/<tabela>.parquet`. O modelo completo, diagrama,
-políticas de carga, funções e exemplo de consulta estão em
-[docs/gold.md](docs/gold.md).
-
-## PostgreSQL do pipeline
-
-O serviço `postgres-pipeline` usa a imagem `postgres:16`, a porta local definida
-por `DATABASE_PORT` (5432 por padrão no Compose)
-e o volume `postgres-pipeline-db-volume`. Ele é separado do serviço `postgres`
-e do volume usados pelos metadados do Airflow.
-
-Copie e ajuste `.env.example` quando necessário. O `.env` real é ignorado pelo
-Git e lido pelo Pydantic:
-
-```bash
-docker compose up -d postgres-pipeline
-```
-
-Antes de cada carga, a camada executa em ordem os arquivos idempotentes de
-`SQL/bronze`. Esses arquivos criam o schema `bronze`, as tabelas `currencies` e
-`rates` e garantem que as colunas vindas da API sejam `TEXT`. A mesma estrutura
-da silver fica em `sql/silver`, com tipos semânticos. `sql/gold` cria as dimensões de moeda e data e a fato de cotações, com
-chaves primárias, estrangeiras e índices.
-
-A gravação usa o protocolo `COPY FROM STDIN` do psycopg. Reexecutar o mesmo lote
-remove e recarrega somente aquele `_ingestion_batch_id`, na mesma transação dos arquivos
-SQL, sem duplicar registros.
-
-O pacote `database` centraliza configuração validada, conexão/transação e as
-operações `DELETE`, `TRUNCATE`, `INSERT`, upsert com
-`INSERT ... ON CONFLICT DO UPDATE` e carga de DataFrames via `COPY`.
-
-## Testes
-
-```bash
-python -m unittest discover -s tests -v
-```
-
+PostgreSQL integration tests are opt-in: set `GOLD_TEST_DSN` to a disposable database without an existing `gold` schema. They are skipped by default.
