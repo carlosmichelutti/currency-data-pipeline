@@ -175,7 +175,7 @@ class SilverTests(unittest.TestCase):
             again = run_silver('batch-1', root / 'bronze', root / 'silver', persist_database=False)
             self.assertEqual(result, again)
             for dataset, expected_rows in (('currencies', 2), ('rates', 1)):
-                destination = root / 'silver' / dataset / 'batch-1' / f'{dataset}.parquet'
+                destination = root / 'silver' / dataset / 'batch_id=batch-1' / f'{dataset}.parquet'
                 self.assertEqual(result[f'{dataset}_path'], str(destination.resolve()))
                 self.assertEqual(result[f'{dataset}_rows'], expected_rows)
                 result_frame = pl.read_parquet(destination)
@@ -335,8 +335,8 @@ class SilverTests(unittest.TestCase):
                     'batch-1', root / 'bronze', root / 'silver',
                     database_factory=PostgresDatabase,
                 )
-            self.assertTrue((root / 'silver' / 'currencies' / 'batch-1' / 'currencies.parquet').is_file())
-            self.assertTrue((root / 'silver' / 'rates' / 'batch-1' / 'rates.parquet').is_file())
+            self.assertTrue((root / 'silver' / 'currencies' / 'batch_id=batch-1' / 'currencies.parquet').is_file())
+            self.assertTrue((root / 'silver' / 'rates' / 'batch_id=batch-1' / 'rates.parquet').is_file())
         connection.rollback.assert_called_once_with()
         connection.commit.assert_not_called()
         connection.close.assert_called_once_with()
