@@ -61,8 +61,10 @@ class FrankfurterAPIClient:
                 A comma-separated string and an iterable of strings are both accepted.
                 When omitted, the API returns every available quote currency.
             date (str | Date | None): Exact rate date in YYYY-MM-DD format.
-            start_date (str | Date | None): First date of a historical range in YYYY-MM-DD format.
-            end_date (str | Date | None): Last date of a historical range in YYYY-MM-DD format.
+            start_date (str | Date | None): First date of a historical range in
+                YYYY-MM-DD format.
+            end_date (str | Date | None): Last date of a historical range in
+                YYYY-MM-DD format.
             providers (str | Iterable[str] | None): Provider keys used to filter rates.
             group (str | None): Optional range grouping, either ``week`` or ``month``.
             expand_providers (bool): Whether each rate should include provider details.
@@ -119,7 +121,7 @@ class FrankfurterAPIClient:
 
         Raises:
             ValueError: If a provider value is empty.
-            FrankfurterAPIError: If the currencies payload has an invalid structure.
+            FrankfurterAPIError: If the API request or response is invalid.
         """
         params: dict[str, str] = {}
         if include_legacy:
@@ -231,8 +233,10 @@ def extract_rates(
         base (str): Base currency code used to calculate the rates.
         quotes (str | Iterable[str] | None): Quote currency codes to include.
         date (str | Date | None): Exact rate date in YYYY-MM-DD format.
-        start_date (str | Date | None): First date of a historical range in YYYY-MM-DD format.
-        end_date (str | Date | None): Last date of a historical range in YYYY-MM-DD format.
+        start_date (str | Date | None): First date of a historical range in
+            YYYY-MM-DD format.
+        end_date (str | Date | None): Last date of a historical range in
+            YYYY-MM-DD format.
         providers (str | Iterable[str] | None): Provider keys used to filter rates.
         group (str | None): Optional range grouping, either ``week`` or ``month``.
         expand_providers (bool): Whether each rate should include provider details.
@@ -322,8 +326,8 @@ def run_extract(
     Extract currencies and rates and persist both raw JSON responses locally.
 
     Args:
-        batch_id (str | None): Batch identifier formatted as YYYYMMDDHHMMSS.
-            The current UTC-03:00 timestamp is used when omitted.
+        batch_id (str | None): Batch identifier reused as supplied. When omitted
+            or empty, the current UTC-03:00 timestamp is used in YYYYMMDDHHMMSS format.
         base (str): Base currency code used to calculate the rates.
         quotes (str | Iterable[str] | None): Quote currency codes to include.
             When omitted, every available quote currency is extracted.
@@ -534,7 +538,8 @@ def _read_error_message(response: requests.Response | None) -> str:
         response (requests.Response | None): Failed response attached to an HTTP error.
 
     Returns:
-        str: API-provided message when available, otherwise the HTTP reason.
+        str: API-provided message, the HTTP reason, or ``unknown error`` when
+            neither is available.
     """
     if response is None:
         return 'unknown error'
