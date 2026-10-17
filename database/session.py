@@ -13,7 +13,7 @@ from database.writer import copy_dataframe, insert_rows
 
 class PostgresDatabase:
     """
-    Manage or reuse a psycopg connection for transactional operations.\
+    Manage or reuse a psycopg connection for transactional operations.
     """
 
     def __init__(

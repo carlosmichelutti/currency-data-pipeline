@@ -38,7 +38,6 @@ from scripts.silver import (
 
 
 def with_metadata(frame: pl.DataFrame, dataset: str, batch: str = 'batch-1') -> pl.DataFrame:
-    """Attach realistic bronze/silver lineage to a business fixture."""
     return frame.with_columns(
         pl.Series('_source_row_number', range(1, frame.height + 1), dtype=pl.Int64),
         pl.lit(f'raw/{dataset}/batch_id={batch}/data.json').alias('_source_path'),
@@ -51,7 +50,6 @@ def with_metadata(frame: pl.DataFrame, dataset: str, batch: str = 'batch-1') -> 
 
 
 def currency_source(batch: str = 'batch-1') -> pl.DataFrame:
-    """Provide three catalogue members with nullable optional attributes."""
     return transform_currencies(with_metadata(pl.DataFrame({
         'iso_code': ['BRL', 'USD', 'EUR'],
         'iso_numeric': ['986', '840', None],
@@ -63,7 +61,6 @@ def currency_source(batch: str = 'batch-1') -> pl.DataFrame:
 
 
 def rate_source(batch: str = 'batch-1') -> pl.DataFrame:
-    """Provide different dates and pairs, including one calendar gap."""
     return transform_rates(with_metadata(pl.DataFrame({
         'date': ['2026-10-01', '2026-10-03', '2026-10-03'],
         'base': ['BRL', 'BRL', 'USD'],
@@ -73,7 +70,6 @@ def rate_source(batch: str = 'batch-1') -> pl.DataFrame:
 
 
 def gold_frames(batch: str = 'batch-1', rates: pl.DataFrame | None = None) -> dict[str, pl.DataFrame]:
-    """Build a complete relational gold fixture."""
     rates = rate_source(batch) if rates is None else rates
     currencies = build_currency_dimension(currency_source(batch))
     dates = build_date_dimension(rates)

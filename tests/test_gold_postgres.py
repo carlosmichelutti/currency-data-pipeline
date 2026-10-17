@@ -1,9 +1,3 @@
-"""Opt-in SQL integration tests against a disposable PostgreSQL database.
-
-Set GOLD_TEST_DSN explicitly. Each test rolls back its DDL/data and skips a
-connection that already has a gold schema, protecting an existing pipeline.
-"""
-
 import logging
 import os
 import unittest

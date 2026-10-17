@@ -16,15 +16,6 @@ from scripts.extract import (
 
 
 def make_response(payload: object) -> Mock:
-    """Create a successful mocked requests response.
-
-    Args:
-        payload (object): Python value returned when the response JSON is decoded.
-
-    Returns:
-        unittest.mock.Mock: Response mock configured with the supplied payload.
-    """
-
     response = Mock(spec=Response)
     response.status_code = 200
     response.json.return_value = payload
