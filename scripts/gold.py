@@ -432,7 +432,12 @@ def build_exchange_rate_fact(
     require_columns(rates, RATE_FIELDS)
     validate_silver_schema(
         rates,
-        {'date': pl.Date, 'base': pl.String, 'quote': pl.String, 'rate': pl.Float64},
+        {
+            'date': pl.Date,
+            'base': pl.String,
+            'quote': pl.String,
+            'rate': pl.Float64
+        },
         'rates'
     )
     _reject_rows(
